@@ -1,0 +1,41 @@
+{
+  "sourceCommit": "062c9b74917b6b19f20cdbeac864eed113aec5e9",
+  "sourceTreeDirty": false,
+  "files": [
+    {
+      "path": "index.html",
+      "bytes": 6787,
+      "sha256": "89b90a5ff234b68b1cfc0000b9bb42aec9012055ca224f9130627d49c6aedf3b"
+    },
+    {
+      "path": "style.css",
+      "bytes": 65955,
+      "sha256": "9dbcc6c6fc9d1281f2053f743869777bd390a5783b837776fbb614a8b5eb87c0"
+    },
+    {
+      "path": "app.js",
+      "bytes": 154390,
+      "sha256": "c3a7a3243128f7a22e686a32be61740e1f37831ec8562a2eb7a7eb7e6778492f"
+    },
+    {
+      "path": "core.js",
+      "bytes": 33554,
+      "sha256": "f750a498ea95a14b3c0b083f819bfc50e995e47d46001913abfe08ce4b6cbaae"
+    },
+    {
+      "path": "zip.js",
+      "bytes": 5686,
+      "sha256": "c39cf503b6cb5653dddf1bffcd587ba52ace3b41498047db1aae964e596e0a2c"
+    },
+    {
+      "path": "vendor/fflate.js",
+      "bytes": 90922,
+      "sha256": "b7ca4450b19559a1d50eb381adcee94b82449674be4cd17789d9beba7e6122a1"
+    },
+    {
+      "path": "vendor/fflate.LICENSE.txt",
+      "bytes": 1069,
+      "sha256": "0a1df3a083d0c010560aa342e87959c8c1070e6fd54545741f083f22d0c8b551"
+    }
+  ]
+}
