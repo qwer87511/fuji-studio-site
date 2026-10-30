@@ -236,3 +236,9 @@ button[aria-busy=true]::after{content:"…";font-weight:600}
 @container(max-width:18rem){.folderCountGrid{grid-template-columns:1fr}}
 
 #folderGuide{flex-basis:100%;text-align:left;font-size:1.125rem}#folderGuide>summary{min-height:44px;align-content:center;cursor:pointer}#folderGuide p{font-size:inherit;line-height:1.7;max-width:55ch}
+
+#toneState{order:2;flex:1 1 100%;display:flex;flex-wrap:wrap;align-items:center;gap:.5rem;font-size:1.125rem;line-height:1.5;border-top:1px solid var(--line);padding-top:.4rem}#toneState[hidden]{display:none!important}#toneCurrentLook,#toneCurrentSave{display:inline-flex;align-items:center;gap:.35rem;min-width:0;overflow-wrap:anywhere}#toneCurrentLook{flex:1 1 9rem}#toneCurrentSave{border:1px solid var(--line-strong);padding:.15rem .4rem}#toneState.error #toneCurrentSave{border-color:var(--danger)}.editorHead #exportShortNote{order:3}
+
+#toneInline[hidden]{display:none!important}#toneInline{margin:1rem 0;font-size:1.125rem;line-height:1.5;border-top:1px solid var(--line-strong);scroll-margin-top:calc(var(--mobile-canvas-height,0px) + 12px)}#toneInline>summary{min-height:44px;align-content:center;cursor:pointer}#toneInline>summary .studioIcon{vertical-align:middle;margin-right:.3rem}.toneInlineCard{display:grid;gap:.4rem;padding:.5rem 0;overflow-wrap:anywhere}.toneInlineCard strong{font-weight:600}#toneInline:is([data-state=error],[data-state=conflict],[data-state=dirty])>summary{color:var(--danger)}
+
+#catalogCandidatePreview{font-size:1.125rem;line-height:1.6;margin:1.5rem 0;border-top:1px solid var(--line);overflow-wrap:anywhere}#catalogCandidatePreview>summary{min-height:44px;align-content:center;cursor:pointer}

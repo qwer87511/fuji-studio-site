@@ -1,21 +1,21 @@
 {
-  "sourceCommit": "062c9b74917b6b19f20cdbeac864eed113aec5e9",
+  "sourceCommit": "22b5bd758f51d5ba9c77d0501b86865ccecf54ef",
   "sourceTreeDirty": false,
   "files": [
     {
       "path": "index.html",
-      "bytes": 6787,
-      "sha256": "89b90a5ff234b68b1cfc0000b9bb42aec9012055ca224f9130627d49c6aedf3b"
+      "bytes": 14791,
+      "sha256": "284b558996a59ec4aecf140d57f3648f7eeae7b0455a6f3d818acebeabb04512"
     },
     {
       "path": "style.css",
-      "bytes": 65955,
-      "sha256": "9dbcc6c6fc9d1281f2053f743869777bd390a5783b837776fbb614a8b5eb87c0"
+      "bytes": 67291,
+      "sha256": "c166d607305b2681ca6793437732078b535e30e421ebd8bf122764954f303933"
     },
     {
       "path": "app.js",
-      "bytes": 154390,
-      "sha256": "c3a7a3243128f7a22e686a32be61740e1f37831ec8562a2eb7a7eb7e6778492f"
+      "bytes": 160939,
+      "sha256": "a16ed6aa1125cd2ca7f3b3ddd117b0387131283bef15c57c57c57b54f3e8e237"
     },
     {
       "path": "core.js",

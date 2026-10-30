@@ -7,6 +7,7 @@ let toneNavigationBusy=false,toneContextStarted=false;const keptNameOrder=new In
 let exportController=null,readingMessageMarker=null,savingSession=false,readingAction=null,pendingSaves=0;
 const saveErrors=new WeakMap();
 const saveStatus=document.createElement('p');saveStatus.id='saveState';saveStatus.className='saveState';saveStatus.setAttribute('role','status');$('message').before(saveStatus);
+const photoSaveJobs=new WeakMap();
 const conflictPanel=document.createElement('section');conflictPanel.id='conflictPanel';conflictPanel.className='conflictPanel';conflictPanel.hidden=true;
 const conflictText=document.createElement('p');conflictText.id='conflictText';conflictText.setAttribute('role','alert');conflictPanel.append(conflictText);
 for(const [id,label] of [['conflictLocal','保留此分頁版本'],['conflictSaved','採用已保存版本']]) {const button=document.createElement('button');button.id=id;button.textContent=label;conflictPanel.append(button);}
@@ -60,6 +61,7 @@ function updateSaveState() {
   $('saveState').classList.toggle('error',conflicted||(persist&&pending>0&&!writing));setButtonBusy('save',writing);
   const p=current();$('conflictPanel').hidden=!p?._conflict;
   if(p?._conflict)$('conflictText').textContent=`「${p.name}」已由另一個分頁保存。此分頁的修改仍保留，尚未覆蓋已保存版本。請選擇要保留的版本。`;
+  updateToneState();
 }
 async function persistSnapshot(p,snapshot) {
   if(!store)throw new Error('本機資料庫無法使用');
@@ -72,7 +74,7 @@ async function persistSnapshot(p,snapshot) {
     p.revision=saved.revision||0;p._dirty=!sameEdits(p,snapshot);p._conflict=null;saveErrors.delete(p);updateSaveState();
   } catch(error) {p._dirty=true;saveErrors.set(p,error.code==='CONFLICT'?'版本衝突':error.code==='CAPACITY_LIMIT'?'400張上限':error.name==='QuotaExceededError'?'保存空間不足':'保存失敗');if(error.code==='CONFLICT')p._conflict=error.current;updateSaveState();openReadingRecoveryOptions();throw error;}
 }
-function enqueueSave(p,snapshot) {pendingSaves++;updateSaveState();const work=saveQueue.catch(()=>{}).then(()=>persistSnapshot(p,snapshot)).finally(()=>{pendingSaves--;updateSaveState();});saveQueue=work;return work;}
+function enqueueSave(p,snapshot) {pendingSaves++;photoSaveJobs.set(p,(photoSaveJobs.get(p)||0)+1);updateSaveState();const work=saveQueue.catch(()=>{}).then(()=>persistSnapshot(p,snapshot)).finally(()=>{pendingSaves--;photoSaveJobs.set(p,Math.max(0,(photoSaveJobs.get(p)||1)-1));updateSaveState();});saveQueue=work;return work;}
 function saveOne(photo) {
   photo._dirty=true;updateSaveState();
   if(!$('persist').checked){msg('修改保留於目前分頁；已關閉本機保存，刷新不會保留本次變更。');return Promise.resolve(true);}
@@ -366,6 +368,7 @@ function updateToneInsets(){
  const active=readingLayout==='readable'&&studioIdentity==='contact'&&document.body.dataset.stage==='tone'&&matchMedia('(max-width:760px)').matches;
  const room=innerHeight-height-headHeight;
  document.documentElement.dataset.toneToolsPinned=String(active&&room>=Math.max(200,innerHeight*.3));
+ updateToneInlineVisibility();
 }
 function placeReadingCanvas(){if(!readingPreviewSlot)return;const box=$('mobileCanvas'),preview=$('preview').closest('.comparison'),slider=$('compare').closest('label'),active=readingLayout==='readable'&&studioIdentity==='contact'&&document.body.dataset.stage==='tone'&&matchMedia('(max-width:760px)').matches;if(active){box.append(preview,slider);box.hidden=false;}else{readingPreviewSlot.after(preview);readingCompareSlot.after(slider);box.hidden=true;}}
 function placeToneOrder(){
@@ -392,6 +395,26 @@ function applyReadingCopy(){
  }
  const note=$('originalExportNote');if(note){if(readable)$('exportInfo').append(note);else $('exportNoteMarker').before(note);}
  const short=$('exportShortNote');if(short){const text=(p?.sourceFormat==='RAF'?'sRGB 內嵌JPEG副本 · 原片不變':'sRGB JPEG 副本 · 原片不變')+($('persist').checked?'':' · 本分頁，關閉／刷新不保留新變更');if(short.dataset.copyKey!==text){short.replaceChildren(studioIcon('lock'),document.createTextNode(text));short.dataset.copyKey=text;}}
+ updateToneState();
+}
+function updateToneState(){
+ const box=$('toneState'),p=current();if(!box)return;
+ box.hidden=!p||readingLayout!=='readable'||document.body.dataset.stage!=='tone';if(!p)return;
+ const modified=Object.values(normaliseTone(p.adjustments)).some(Boolean),style=(styles[p.style]?.name||styles.original.name)+(p.style==='original'?'':' '+p.strength+'%')+(modified?' · 微調':'');
+ const state=p._conflict?'conflict':!$('persist').checked?'memory':(photoSaveJobs.get(p)||0)>0||savingSession&&p._dirty?'saving':p._dirty||p.revision===null?saveErrors.has(p)?'error':'dirty':'saved';
+ const [icon,label]={conflict:['info','版本衝突'],memory:['lock','僅本頁'],saving:['pending','保存中'],error:['info','保存失敗'],dirty:['pending','未保存'],saved:['check','參數已存']}[state];
+ const look=$('toneCurrentLook'),status=$('toneCurrentSave');if(look.dataset.value!==style){look.replaceChildren(studioIcon('sliders'),document.createTextNode(style));look.dataset.value=style;}if(status.dataset.value!==state){status.replaceChildren(studioIcon(icon),document.createTextNode(label));status.dataset.value=state;}
+ status.setAttribute('aria-label','目前照片編輯參數：'+label+'；不是JPEG下載狀態');box.dataset.state=state;box.dataset.photoId=p.id;box.classList.toggle('error',['conflict','error','dirty'].includes(state));box.title='本機後製；'+photoLabel(p)+'；'+label;
+ const inline=$('toneInline');if(inline){if(inline.dataset.photoId&&inline.dataset.photoId!==p.id)inline.open=false;inline.dataset.photoId=p.id;const values={toneInlineName:photoLabel(p),toneInlineLook:'本機後製 · '+style,toneInlineSave:label,toneInlineHint:state==='saved'?'照片狀態':label};for(const[id,text]of Object.entries(values)){if($(id).textContent!==text)$(id).textContent=text;}inline.dataset.state=state;inline.querySelector('summary').setAttribute('aria-label','目前照片、實際本機後製與保存狀態：'+label);updateToneInlineVisibility();}
+}
+function updateToneInlineVisibility(){
+ const box=$('toneInline');if(!box)return;const active=readingLayout==='readable'&&studioIdentity==='contact'&&document.body.dataset.stage==='tone'&&matchMedia('(max-width:760px)').matches&&document.documentElement.dataset.toneToolsPinned==='false',focused=box.contains(document.activeElement);box.hidden=!active;if(!active&&focused)focusContext($('toneState'));
+}
+function setupToneState(){
+ const box=document.createElement('div');box.id='toneState';box.hidden=true;box.setAttribute('aria-label','目前照片的本機後製與保存');const look=document.createElement('span');look.id='toneCurrentLook';const state=document.createElement('span');state.id='toneCurrentSave';state.setAttribute('role','status');state.setAttribute('aria-live','polite');state.setAttribute('aria-atomic','true');box.append(look,state);$('photoName').after(box);
+ const inline=document.createElement('details');inline.id='toneInline';inline.hidden=true;const summary=document.createElement('summary'),hint=document.createElement('span');summary.id='toneInlineToggle';hint.id='toneInlineHint';summary.append(studioIcon('info'),hint);const card=document.createElement('div');card.className='toneInlineCard';for(const id of ['toneInlineName','toneInlineLook','toneInlineSave']){const line=document.createElement(id==='toneInlineName'?'strong':'span');line.id=id;card.append(line);}inline.append(summary,card);$('resetTone').before(inline);
+ let lastInput=null,returnInput=null,returnPhoto=null,returnPosition=0;const remember=e=>{if(e.target.matches('input[type=range]'))lastInput=e.target;};$('toneDetails').addEventListener('focusin',remember);$('toneDetails').addEventListener('pointerdown',remember);
+ inline.addEventListener('toggle',()=>{if(inline.hidden)return;if(inline.open){returnInput=lastInput;returnPhoto=current()?.id;returnPosition=scrollY;inline.scrollIntoView({block:'start',behavior:'instant'});}else if(returnPhoto===current()?.id&&document.body.dataset.stage==='tone'){if(returnInput?.isConnected)focusContext(returnInput);else{scrollTo({top:returnPosition,behavior:'instant'});summary.focus({preventScroll:true});}}});
 }
 function applyReadingUI(){
  const p=current();for(const[id,icon,text,aria]of [['importTop','folder','資料夾','開啟本機資料夾'],['choose','folder','開啟資料夾','開啟本機資料夾'],['keep','check','保留','保留 K'],['exclude','exclude','排除','排除 X'],['resetDecision','pending','待定','待決定 U'],['nextPending','right','下一張'],['undoDecision','undo','復原','復原標記 Z'],['compareGroup','compare','比較','並列比較相似候選'],['editTone','sliders','調色','調色與匯出'],['overviewReturn','grid','總覽','全部照片'],['backToPhoto','image','照片','回照片'],['save','save','保存','儲存工作階段'],['exportZip','archive','ZIP','打包已保留照片 · ZIP'],['groupToggle','layers',grouped?'分組：開':'分組：關'],['view-overview','grid','','照片總覽'],['view-focus','image','','專注選片'],['copyTone','copy','批次沿用'],['undoBatchTone','undo','復原沿用'],['prevKeptTone','left','上一張'],['nextKeptTone','right','下一張'],['prevPhotoPage','left','上一頁'],['nextPhotoPage','right','下一頁'],['prevCompareGroup','left','上一組'],['nextCompareGroup','right','下一組'],['closeComparison','close','關閉','關閉比較'],['export','download',p?.sourceFormat==='RAF'?'另存內嵌預覽':'另存 JPEG',p?.sourceFormat==='RAF'?'另存RAF內嵌預覽JPEG副本，非RAW開發':'另存風格JPEG副本']])readingButton(id,icon,text,aria);
@@ -416,6 +439,7 @@ function applyContactIdentity(){
 }
 
 function setupReadingUI(){
+ setupToneState();
  const pressedButtons=new Set(),releasePressed=()=>{for(const button of pressedButtons)delete button.dataset.pressed;pressedButtons.clear();};
  document.addEventListener('pointerdown',event=>{const button=event.target.closest?.('button,summary');if(event.button===0&&button&&!button.disabled){button.dataset.pressed='true';pressedButtons.add(button);}},true);
  for(const type of ['pointerup','pointercancel'])document.addEventListener(type,releasePressed,true);window.addEventListener('blur',releasePressed);
@@ -752,7 +776,7 @@ function setupZipExport(){
  $('zipNext').onclick=runZipBatch;$('zipRetry').onclick=()=>{for(const task of zipTasks)if(task.status==='failed'){task.status='pending';delete task.error;}runZipBatch();};
  $('zipDownload').onclick=()=>{if(!zipArtifact||zipController)return;try{if(!zipArtifact.url){zipArtifact.url=URL.createObjectURL(zipArtifact.blob);downloadURLs.add(zipArtifact.url);}const a=document.createElement('a');a.href=zipArtifact.url;a.download=`fuji-studio-copies-${new Date().toISOString().replace(/[:.]/g,'-')}.zip`;a.click();zipArtifact.requested=true;renderZipResults();}catch(error){$('zipStatus').className='message error';$('zipStatus').textContent=`下載啟動失敗：${error.message}。本包仍保留，可再按下載或先保留本分頁。`;}};
 }
-setupAppearance();setupReviewUI();setupZipExport();setupReadingUI();setupArtDirection();
+setupAppearance();setupReviewUI();setupZipExport();setupReadingUI();setupArtDirection();setupCatalogCandidatePreview();
 setupFolderImport();
 window.addEventListener('dragover',e=>e.preventDefault());
 window.addEventListener('drop',e=>{e.preventDefault();msg('照片來源統一由「開啟資料夾」選取；拖放不會讀取或加入檔案。');});
@@ -810,3 +834,5 @@ try{
  msg(savedPhotoCount?`已有 ${savedPhotoCount} 張本機保存紀錄；請重選照片資料夾，依內容銜接既有編輯。未連線原資料夾。`:'原片不變 · 本機處理');
 }catch{$('persist').checked=false;msg('無法開啟本機保存；仍可主動選取資料夾。新變更僅留分頁，刷新前請另存副本。',true);}
 finally{setBusy(false);}
+
+function setupCatalogCandidatePreview(){const raw=$("catalogCandidateSnapshot");if(!raw)return;const panel=document.createElement("details");panel.id="catalogCandidatePreview";const title=document.createElement("summary");title.textContent="參考目錄候選";panel.append(title);try{const state=JSON.parse(raw.textContent),c=state.candidate;const status=document.createElement("p");status.id="catalogCandidateStatus";status.setAttribute("role","status");status.textContent=state.status==="stale"||!state.nextCheck||Date.parse(state.nextCheck)<=Date.now()?"來源過期／更新失敗，保留最後成功候選 · "+(state.error||"已到再次檢查時間"):"已驗證候選，未套用 · 不改照片參數";panel.append(status);if(c){if(c.schema!==1||c.model!=="X100VI"||c.candidateOnly!==true||!Array.isArray(c.entries)||c.entries.length!==20||new Set(c.entries.map(e=>e.id)).size!==20||c.sourceUrl!=="https://app.fujifilm-dsc.com/en/manual/x100vi/menu_shooting/image_quality_setting/"||c.entries.some(e=>e.postProcess!==false||e.model!=="X100VI"||e.kind!=="official"))throw Error("候選相容性或欄位無效");const meta=document.createElement("p");meta.textContent="FUJIFILM · X100VI · 機內參考 · v"+c.version+" · 取得 "+c.retrievedAt;panel.append(meta);const source=document.createElement("a");source.href=c.sourceUrl;source.textContent="官方原文";source.target="_blank";source.rel="noopener noreferrer";panel.append(source);const list=document.createElement("ul");for(const e of c.entries){const li=document.createElement("li");li.textContent=e.name;list.append(li);}panel.append(list);const note=document.createElement("p");note.textContent="對應現有20項官方參考，總目錄仍31項，不新增。僅名稱與事實欄位，非JPEG後製；相機參考與本機近似分開，既有調整不變。";panel.append(note);}else status.textContent+="；尚無有效候選";}catch{const error=document.createElement("p");error.textContent="候選無效，沿用內建目錄；照片參數不變。";error.setAttribute("role","alert");panel.replaceChildren(title,error);}document.querySelector(".limits").after(panel);}
