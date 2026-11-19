@@ -1,5 +1,14 @@
-import { importSourcePath, styles, styleCatalog, recommendSourceIds, localStyleSuggestions, normaliseTone, transform, analyze, groups, tips, orderedPhotoGroups, qualityBreakdown, openStore, editsOf, sameEdits, prepareImage, rawJpegCandidates, withDecoded, releaseCanvas, drawDecoded, encodeJpegCopy } from './core.js';
+// Independently paraphrased facts from FUJIFILM. Reference only, never image presets.
+// Links are user-opened; this table does not extend any fetch/update schedule.
+const officialModeStories=Object.freeze({
+ 'official-acros':Object.freeze({text:'構思來自 NEOPAN 100 ACROS 黑白底片，承接細緻顆粒與階調的脈絡。',sourceUrl:'https://www.fujifilm-x.com/en-gb/learning-centre/get-to-grips-with-film-simulation-modes/',sourceTitle:'FUJIFILM — Get to Grips with Film Simulation Modes',checkedAt:'2026-11-03'}),
+ 'official-classic-chrome':Object.freeze({text:'並非某一款實體底片的復刻，而是取材紀實照片與雜誌印刷的氛圍。',sourceUrl:'https://www.fujifilm-x.com/en-us/stories/film-simulation-classic-chrome/',sourceTitle:'FUJIFILM — Film Simulation CLASSIC CHROME',checkedAt:'2026-11-03'}),
+ 'official-eterna':Object.freeze({text:'名稱沿用 FUJIFILM 的同名電影底片；電影製作的調色脈絡是設計背景。',sourceUrl:'https://www.fujifilm-x.com/en-us/stories/intermediate-month-12-video-47-eterna/',sourceTitle:'FUJIFILM — Why You Should Use ETERNA for Movies',checkedAt:'2026-11-03'})
+});
+
+import { buildSelectionDraft, importSourcePath, styles, styleCatalog, recommendSourceIds, localStyleSuggestions, normaliseTone, transform, analyze, groups, tips, orderedPhotoGroups, qualityBreakdown, openStore, editsOf, sameEdits, prepareImage, rawJpegCandidates, withDecoded, releaseCanvas, drawDecoded, encodeJpegCopy } from './core.js';
 const $=id=>document.getElementById(id);
+let selectionRun=null,selectionUndo=null,selectionApplying=false;const selectionThumbs=new Map();
 let interfaceTheme='graphite';try{interfaceTheme=localStorage.getItem('fuji-studio-appearance')==='charcoal'?'charcoal':'graphite';}catch{}document.documentElement.dataset.theme=interfaceTheme;
 let readingLayout='readable';try{readingLayout=localStorage.getItem('fuji-studio-layout')==='compact'?'compact':'readable';}catch{}document.documentElement.dataset.layout=readingLayout;
 let studioIdentity='contact';try{studioIdentity=localStorage.getItem('fuji-studio-identity')==='plain'?'plain':'contact';}catch{}document.documentElement.dataset.identity=studioIdentity;
@@ -21,8 +30,14 @@ try{comparisonAfterKeep=JSON.parse(localStorage.getItem('fuji-studio-comparison'
 let comparisonCandidateBusy=false,comparisonCandidatePending=null;
 const comparisonFactsOpen=new Set();
 let folderRun=null,folderSequence=0,savedPhotoCount=0;
-let previewError=false;
-let sourceCategory='app';
+const reviewPositionKey='fuji-studio-review-position-v1';let activeReviewSource=null;
+async function reviewSourceKey(records){try{const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(records.map(p=>p.id).sort().join('\n')));return [...new Uint8Array(bytes)].map(b=>b.toString(16).padStart(2,'0')).join('');}catch{return null;}}
+function clearReviewPosition(){try{sessionStorage.removeItem(reviewPositionKey);}catch{}}
+function rememberReviewPosition(){if(!activeReviewSource||!selected||!$('persist').checked)return;try{const value=JSON.stringify({schema:1,source:activeReviewSource,photo:selected});if(sessionStorage.getItem(reviewPositionKey)!==value)sessionStorage.setItem(reviewPositionKey,value);}catch{clearReviewPosition();}}
+function restoredReviewPosition(source,records){if(!source)return null;try{const state=JSON.parse(sessionStorage.getItem(reviewPositionKey)||'null');return state?.schema===1&&state.source===source&&/^[a-f0-9]{64}$/.test(state.photo)&&records.some(p=>p.id===state.photo)?state.photo:null;}catch{return null;}}
+let previewError=false,previewOriginalOnly=false,toneResetUndo=null;
+let directSplitDrag=null,directSplitApplying=false;
+let sourceCategory='app';const styleStrengthMemory=new Map();
 let batchProfile=null,batchApplying=false,lastBatch=null,batchPreviewToken=0,batchPreviewBusy=false,comparisonUseTone=false;
 const urls=new Map(), downloadURLs=new Set();
 const styledThumbs=new Map(),thumbPending=new Map();let galleryGeneration=0,galleryUseTone=true;
@@ -51,7 +66,7 @@ function photoGroups(){
   return groupMembership.map(items=>({items,best:items.filter(p=>p.decision!=='exclude').sort((a,b)=>b.metrics.score-a.metrics.score||a.name.localeCompare(b.name))[0]?.id||null}));
 }
 function trimThumbnailURLs(ids){const retain=new Set(ids);if(selected)retain.add(selected);for(const [id,url]of urls)if(!retain.has(id)){URL.revokeObjectURL(url);urls.delete(id);}}
-const msg=(text,error=false)=>{$('message').textContent=text;$('message').classList.toggle('error',error);$('message').classList.toggle('quiet',!error&&(text.startsWith('已儲存')||/^新增 \d+ 張 · 重複 \d+ 張 · 失敗 0 張$/.test(text)||text.startsWith('已恢復')));placeReadingMessage();if(error&&photos.some(p=>p._dirty))openReadingRecoveryOptions();};
+const msg=(text,error=false,{direct=false}={})=>{$('message').dataset.directFeedback=String(direct);$('message').textContent=text;$('message').classList.toggle('error',error);$('message').classList.toggle('quiet',!error&&(text.startsWith('已儲存')||/^新增 \d+ 張 · 重複 \d+ 張 · 失敗 0 張$/.test(text)||text.startsWith('已恢復')));placeReadingMessage();if(error&&photos.some(p=>p._dirty))openReadingRecoveryOptions();};
 function hydrate(record) { return {...record, revision:record.revision||0, _dirty:false, _conflict:null, _legacyMetrics:record.metrics.version!==2}; }
 function updateSaveState() {
   const pending=photos.filter(p=>p._dirty).length,persist=$('persist').checked,conflicted=photos.some(p=>p._conflict),writing=savingSession||pendingSaves>0,failed=photos.find(p=>p._dirty&&saveErrors.has(p)),reason=failed?saveErrors.get(failed):'';
@@ -59,7 +74,7 @@ function updateSaveState() {
   $('saveState').textContent=!persist?`本分頁模式 · ${pending} 張未保存；關閉或刷新不保留新變更。${conflicted?'仍有保存衝突，請先處理。':''}`:conflicted?'保存衝突 · 請選擇版本':writing?'正在保存…':pending?`${pending} 張尚未保存${reason?' · '+reason:''}`:'瀏覽器已存';
   if(photos.length&&persist&&!pending&&!writing&&!conflicted)$('saveState').prepend(studioIcon('check'));
   $('saveState').classList.toggle('error',conflicted||(persist&&pending>0&&!writing));setButtonBusy('save',writing);
-  const p=current();$('conflictPanel').hidden=!p?._conflict;
+  const p=current();if(p?._conflict)styleStrengthMemory.delete(p.id);$('conflictPanel').hidden=!p?._conflict;
   if(p?._conflict)$('conflictText').textContent=`「${p.name}」已由另一個分頁保存。此分頁的修改仍保留，尚未覆蓋已保存版本。請選擇要保留的版本。`;
   updateToneState();
 }
@@ -85,10 +100,10 @@ async function saveToneEdit(photo){
  if(!saved&&selected===photo.id&&$('persist').checked&&document.body.dataset.stage==='tone'&&!busy&&!exporting&&!batchApplying&&!decisionBusy&&!toneNavigationBusy&&!document.querySelector('dialog[open]'))showSaveRecovery();
  return saved;
 }
-function updateExportState() {$('export').disabled=exporting||toneNavigationBusy||!originalPreview||!current();if($('previewStatus')){$('preview').hidden=!originalPreview;$('previewStatus').hidden=Boolean(originalPreview);$('previewStatus').textContent=previewError?'預覽解碼未成功；原片仍保留，可按重試。':'正在本機準備完整預覽…';$('retryPreview').hidden=!previewError;$('previewPlaceholder').hidden=Boolean(originalPreview)||!current();}describeDisabled('export',exporting?'正在製作副本':toneNavigationBusy?'正在切換照片':!current()?'先選照片':previewError?'預覽失敗，請先重試':'正在載入照片');updateDecisionControls();}
-function setBusy(value) {busy=value;for(const id of ['choose','importTop','save','persist'])if($(id))$(id).disabled=value||exporting||batchApplying||toneNavigationBusy||Boolean(folderRun)||(savingSession&&['save','persist'].includes(id))||$(id).dataset.unsupported==='true';for(const id of ['choose','importTop'])setButtonBusy(id,value);setButtonBusy('save',savingSession||pendingSaves>0);setButtonBusy('export',exporting);setButtonBusy('folderConfirm',Boolean(folderRun?.phase==='committing'&&value));for(const id of ['choose','importTop'])describeDisabled(id,$(id)?.dataset.unsupported==='true'?'此瀏覽器不支援資料夾':folderRun?'先完成或取消資料夾選取':'正在處理照片');describeDisabled('save',savingSession?'正在保存':folderRun?'先完成或取消資料夾選取':'正在處理照片');$('progressArea').hidden=!value;updateExportState();}
+function updateExportState() {const ready=Boolean(originalPreview)&&!previewError;updateToneResetControls();syncPreviewMode();$('export').disabled=exporting||toneNavigationBusy||!ready||!current();if($('previewStatus')){$('preview').hidden=!ready;$('previewStatus').hidden=ready;$('previewStatus').textContent=previewError?'預覽未成功；參數與原片保留，可調整或重試。':'正在本機準備完整預覽…';$('retryPreview').hidden=!previewError;$('previewPlaceholder').hidden=Boolean(originalPreview)||!current();}describeDisabled('export',exporting?'正在製作副本':toneNavigationBusy?'正在切換照片':!current()?'先選照片':previewError?'預覽失敗，請先重試':'正在載入照片');updateDecisionControls();}
+function setBusy(value) {busy=value;updateSelectionEntry();updateWorkbenchFlow();for(const id of ['choose','importTop','save','persist'])if($(id))$(id).disabled=value||exporting||batchApplying||toneNavigationBusy||Boolean(folderRun)||(savingSession&&['save','persist'].includes(id))||$(id).dataset.unsupported==='true';for(const id of ['choose','importTop'])setButtonBusy(id,value);setButtonBusy('save',savingSession||pendingSaves>0);setButtonBusy('export',exporting);setButtonBusy('folderConfirm',Boolean(folderRun?.phase==='committing'&&value));for(const id of ['choose','importTop'])describeDisabled(id,$(id)?.dataset.unsupported==='true'?'此瀏覽器不支援資料夾':folderRun?'先完成或取消資料夾選取':'正在處理照片');describeDisabled('save',savingSession?'正在保存':folderRun?'先完成或取消資料夾選取':'正在處理照片');$('progressArea').hidden=!value;updateExportState();}
 function thumbnailURL(p) {if(!urls.has(p.id))urls.set(p.id,URL.createObjectURL(p.thumb));return urls.get(p.id);}
-function updateSummary(){const keep=photos.filter(p=>p.decision==='keep').length;$('summary').textContent=photos.length?`${photos.length} 張畫面，${keep} 張已決定留下。`:'你的下一段記憶，從這裡開始。';$('count').textContent=`${photos.length} 張 · 保留 ${keep} 張`;$('workspace').hidden=!photos.length;document.body.classList.toggle('working',photos.length>0);if($('reviewProgress'))$('reviewProgress').textContent=`待決定 ${photos.filter(p=>p.decision==='pending').length} · 保留 ${keep}`;}
+function updateSummary(){updateSelectionEntry();const keep=photos.filter(p=>p.decision==='keep').length;$('summary').textContent=photos.length?`${photos.length} 張畫面，${keep} 張已決定留下。`:'你的下一段記憶，從這裡開始。';$('count').textContent=`${photos.length} 張 · 保留 ${keep} 張`;$('workspace').hidden=!photos.length;document.body.classList.toggle('working',photos.length>0);if($('reviewProgress'))$('reviewProgress').textContent=`待決定 ${photos.filter(p=>p.decision==='pending').length} · 保留 ${keep}`;}
 function render({revealSelection=false}={}) {
   galleryGeneration++;updateSummary();updateSaveState();const gallery=$('gallery');gallery.replaceChildren();
   const all=photoGroups(), visible=p=>$('filter').value==='all'||p.decision===$('filter').value;
@@ -118,7 +133,7 @@ function render({revealSelection=false}={}) {
   if(!gallery.children.length){const empty=document.createElement('p');empty.className='empty';empty.textContent='這個篩選條件沒有照片。已排除的原片仍會保留。';gallery.append(empty);}
   for(const card of gallery.querySelectorAll('.card'))updateCardLook(photos.find(p=>p.id===card.dataset.id),card);updateGalleryLookStatus();applyReadingUI();
 }
-function focusContext(node,{onlyIfLost=false}={}){const active=document.activeElement,usable=e=>e&&e!==document.body&&e.isConnected&&!e.disabled&&e.getClientRects().length&&getComputedStyle(e).visibility!=="hidden";if(onlyIfLost&&usable(active))return;if(!usable(node))return;if(!node.matches("button,input,select,summary,a[href]"))node.tabIndex=-1;node.scrollIntoView({block:"center",inline:"nearest"});node.focus({preventScroll:true});}
+function focusContext(node,{onlyIfLost=false,block="center"}={}){const active=document.activeElement,usable=e=>e&&e!==document.body&&e.isConnected&&!e.disabled&&e.getClientRects().length&&getComputedStyle(e).visibility!=="hidden";if(onlyIfLost&&usable(active))return;if(!usable(node))return;if(!node.matches("button,input,select,summary,a[href]"))node.tabIndex=-1;node.scrollIntoView({block,inline:"nearest"});node.focus({preventScroll:true});}
 function focusGalleryContext(){focusContext($("gallery").querySelector(".card.active")||$("gallery").querySelector(".card")||$("gallery"));}
 function current(){return photos.find(p=>p.id===selected);}
 function photoContext(photo){
@@ -140,7 +155,8 @@ function renderQuality(p) {
   }
 }
 async function select(id,{openViewer=false}={}) {
-  selected=id;const p=current();if(!p)return;if(!exporting&&$('exportProgress'))$('exportProgress').hidden=true;const token=++previewToken;originalPreview=null;previewError=false;if($('previewPlaceholder'))$('previewPlaceholder').src=thumbnailURL(p);updateExportState();releaseCanvas($('preview'));render({revealSelection:true});
+  stopDirectSplit(true,false);
+  previewOriginalOnly=false;selected=id;const p=current();if(!p)return;rememberReviewPosition();if(!exporting&&$('exportProgress'))$('exportProgress').hidden=true;const token=++previewToken;originalPreview=null;previewError=false;if($('previewPlaceholder'))$('previewPlaceholder').src=thumbnailURL(p);updateExportState();releaseCanvas($('preview'));render({revealSelection:true});
   if(openViewer){setViewMode('focus');setWorkspaceStage('review');}if($('viewerName'))$('viewerName').textContent=photoLabel(p);
   $('photoName').textContent=photoLabel(p);$('dimensions').textContent=`${p.width} × ${p.height} px${Math.max(p.width,p.height)>1200?' · 縮圖預覽；副本'+(Math.max(p.width,p.height)>8192?'長邊8192px':'依原尺寸'):''}${p.sourceFormat==='RAF'?' · RAF內嵌JPEG預覽尺寸，非RAW完整尺寸':''}${p.demo?' · 合成測試，非 X100VI 實拍':''}`;
   $('export').textContent=p.sourceFormat==='RAF'?'另存內嵌預覽副本 ↓':'另存風格副本 ↓';
@@ -172,33 +188,47 @@ function renderStyles() {
   for(const entry of suggested){
     const b=document.createElement('button');b.className='styleButton sourceCard';b.id=entry.postProcess?`style-${entry.styleKey}`:`source-${entry.id}`;b.setAttribute('aria-pressed',String(entry.postProcess?p.style===entry.styleKey:p.referenceId===entry.id));b.setAttribute('aria-label',entry.postProcess?entry.name:`${entry.name}，機內設定參考`);b.title=entry.summary;
     if(entry.postProcess){const canvas=document.createElement('canvas');canvas.width=canvas.height=0;canvas.dataset.stylePreview=entry.styleKey;canvas.setAttribute('role','img');canvas.setAttribute('aria-label',`${entry.name}：同一張照片的本機調色預覽`);b.append(canvas);}
-    const title=document.createElement('strong');title.textContent=entry.name;const note=document.createElement('small');note.textContent=entry.postProcess?'本機近似 · '+entry.summary:entry.author+' · 機內參考';b.append(title,note);b.onclick=()=>chooseSource(entry);$('styles').append(b);
+    const title=document.createElement('strong');title.textContent=entry.name;const note=document.createElement('small');note.textContent=entry.postProcess?'本機近似 · '+entry.summary:entry.author+' · 機內參考';b.append(title,note);b.onkeydown=event=>{if(event.repeat&&(event.key==='Enter'||event.key===' '))event.preventDefault();};b.onclick=()=>chooseSource(entry);$('styles').append(b);
   }
   $('allStyles').replaceChildren();const blank=document.createElement('option');blank.value='';blank.textContent=entries.length?'自由選擇全部項目…':'此分類尚無可用項目';$('allStyles').append(blank);for(const entry of entries){const option=document.createElement('option');option.value=entry.id;option.textContent=entry.name;$('allStyles').append(option);}
   const active=sourceCategory==='app'?`app-${p.style}`:p.referenceId||'';$('allStyles').value=entries.some(entry=>entry.id===active)?active:'';
   $('allStyles').disabled=!entries.length;
   const reference=styleCatalog.find(entry=>entry.id===p.referenceId);$('referenceBox').hidden=!reference;if(reference)$('referenceText').textContent=`此張參考：${reference.name}／${reference.author}。只記錄相機設定參考，未套用到JPEG；目前本機後製為「${styles[p.style]?.name||p.style}」。`;
-  applyReadingCopy();renderSourceDetails(styleCatalog.find(entry=>entry.id===active));for(const [key,value]of Object.entries(normaliseTone(p.adjustments))){$(`tone-${key}`).value=value;$(`tone-${key}-value`).textContent=value>0?'+'+value:String(value);}renderStylePreviews();
+  applyReadingCopy();renderSourceDetails(styleCatalog.find(entry=>entry.id===active));for(const [key,value]of Object.entries(normaliseTone(p.adjustments))){$(`tone-${key}`).value=value;$(`tone-${key}-value`).textContent=value>0?'+'+value:String(value);}renderStylePreviews();updateToneResetControls();
 }
-async function chooseSource(entry){const p=current();if(!p)return;if(entry.postProcess)p.style=entry.styleKey;else p.referenceId=entry.id;renderStyles();drawPreview();const saved=await saveToneEdit(p);if(saved&&!entry.postProcess&&selected===p.id)msg('已記錄此張的相機設定參考；目前JPEG色彩未因這項參考而改變。');}
+function rememberedStyleStrength(p,key){return key===p.style?p.strength:styleStrengthMemory.get(p.id)?.get(key)??p.strength;}
+function chooseLocalStyle(p,key){let strengths=styleStrengthMemory.get(p.id);if(!strengths){strengths=new Map();styleStrengthMemory.set(p.id,strengths);}strengths.set(p.style,p.strength);p.strength=rememberedStyleStrength(p,key);p.style=key;$('strength').value=p.strength;$('strengthValue').textContent=p.strength+'%';}
+async function chooseSource(entry){const p=current();if(!p)return;const focusedCard=$('styles').contains(document.activeElement)?document.activeElement.id:null;if(entry.postProcess){previewOriginalOnly=false;chooseLocalStyle(p,entry.styleKey);}else p.referenceId=entry.id;renderStyles();drawPreview();if(focusedCard&&selected===p.id)$(focusedCard)?.focus({preventScroll:true});const saved=await saveToneEdit(p);if(saved&&!entry.postProcess&&selected===p.id)msg('已記錄此張的相機設定參考；目前JPEG色彩未因這項參考而改變。');}
 function renderSourceDetails(entry){
   const content=$('sourceDetailsContent');content.replaceChildren();if(!entry){content.textContent='選一項後查看作者、版本、兼容性、事實參數與來源。';return;}
+  const story=entry.kind==='official'&&!entry.postProcess?officialModeStories[entry.id]:null;
+  if(story){const paragraph=document.createElement('p');paragraph.id='sourceStory';paragraph.dataset.sourceId=entry.id;paragraph.append(document.createTextNode('由來：'+story.text+' '));const link=document.createElement('a');link.href=story.sourceUrl;link.target='_blank';link.rel='noopener noreferrer';link.textContent='官方說明 ↗';link.title=story.sourceTitle+' · 核對 '+story.checkedAt;paragraph.append(link);content.append(paragraph);}
   for(const text of [`作者：${entry.author}`,`版本：${entry.version} · 核對 ${entry.reviewedAt}`,`兼容性：${entry.compatibility}`,`授權狀態：${entry.licenseStatus}`,...entry.notes]){const p=document.createElement('p');p.textContent=text;content.append(p);}
   const names={film:'機內模式',dr:'動態範圍',wb:'白平衡',red:'WB 紅',blue:'WB 藍',highlight:'高光',shadow:'陰影',color:'色彩',sharpness:'銳利度',noiseReduction:'高ISO NR',clarity:'Clarity',grain:'顆粒',colorChrome:'Color Chrome',fxBlue:'Color Chrome FX Blue'};const list=document.createElement('dl');for(const [key,value]of Object.entries(entry.parameters)){const dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=names[key]||key;dd.textContent=String(value);list.append(dt,dd);}content.append(list);
-  if(entry.sourceUrl){const link=document.createElement('a');link.href=entry.sourceUrl;link.target='_blank';link.rel='noopener noreferrer';link.textContent='開啟作者／官方原始來源 ↗';content.append(link);}else{const note=document.createElement('p');note.textContent='來源：本專案自製近似參數，沒有官方成像或第三方預設檔。';content.append(note);}
+  if(entry.sourceUrl){const link=document.createElement('a');link.href=entry.sourceUrl;link.target='_blank';link.rel='noopener noreferrer';link.textContent='開啟作者／官方原始來源 ↗';content.append(link);}else{const note=document.createElement('p');note.textContent='本分頁分別記住各照片／近似風格的強度，微調共用；重新開啟只留最後保存的一組。自製RGB效果，非官方成像。';content.append(note);}
   if(entry.compatibilitySource&&entry.compatibilitySource!==entry.sourceUrl){const line=document.createElement('p'),link=document.createElement('a');link.href=entry.compatibilitySource;link.target='_blank';link.rel='noopener noreferrer';link.textContent='查看作者的相容機型來源 ↗';line.append(link);content.append(line);}
 }
 function renderStylePreviews(){
   if(!originalPreview)return;const targets=$('styles').querySelectorAll('canvas[data-style-preview]');if(!targets.length)return;const p=current(),temp=document.createElement('canvas');
-  try{temp.width=originalPreview.width;temp.height=originalPreview.height;temp.getContext('2d').putImageData(originalPreview,0,0);for(const canvas of targets){const scale=Math.min(1,180/Math.max(temp.width,temp.height));canvas.width=Math.max(1,Math.round(temp.width*scale));canvas.height=Math.max(1,Math.round(temp.height*scale));const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(temp,0,0,canvas.width,canvas.height);const image=ctx.getImageData(0,0,canvas.width,canvas.height);transform(image.data,canvas.dataset.stylePreview,p.strength/100,p.adjustments);ctx.putImageData(image,0,0);}}
+  try{temp.width=originalPreview.width;temp.height=originalPreview.height;temp.getContext('2d').putImageData(originalPreview,0,0);for(const canvas of targets){const scale=Math.min(1,180/Math.max(temp.width,temp.height));canvas.width=Math.max(1,Math.round(temp.width*scale));canvas.height=Math.max(1,Math.round(temp.height*scale));const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(temp,0,0,canvas.width,canvas.height);const image=ctx.getImageData(0,0,canvas.width,canvas.height);const strength=rememberedStyleStrength(p,canvas.dataset.stylePreview);canvas.dataset.styleStrength=String(strength);canvas.closest('button').setAttribute('aria-label',styles[canvas.dataset.stylePreview].name+'，本機近似強度 '+strength+'%');transform(image.data,canvas.dataset.stylePreview,strength/100,p.adjustments);ctx.putImageData(image,0,0);}}
   finally{releaseCanvas(temp);}
 }
 function drawPreview() {
-  const p=current();if(!p||!originalPreview)return;const canvas=$('preview');canvas.width=originalPreview.width;canvas.height=originalPreview.height;const ctx=canvas.getContext('2d');
+  const p=current();if(!p||!originalPreview)return;try{const canvas=$('preview');canvas.width=originalPreview.width;canvas.height=originalPreview.height;const ctx=canvas.getContext('2d');
   const edited=new ImageData(new Uint8ClampedArray(originalPreview.data),canvas.width,canvas.height);transform(edited.data,p.style,p.strength/100,p.adjustments);ctx.putImageData(edited,0,0);
-  const split=Math.round(canvas.width*Number($('compare').value)/100);ctx.putImageData(originalPreview,0,0,0,0,split,canvas.height);ctx.fillStyle='#e8e8df';ctx.fillRect(split,0,Math.max(1,canvas.width/500),canvas.height);
+  const split=Math.round(canvas.width*(previewOriginalOnly?100:Number($('compare').value))/100);ctx.putImageData(originalPreview,0,0,0,0,split,canvas.height);if(split>0&&split<canvas.width){ctx.fillStyle='#e8e8df';ctx.fillRect(split,0,Math.max(1,canvas.width/500),canvas.height);}previewError=false;syncPreviewMode();
   renderStylePreviews();
   refreshCurrentThumbnail();
+  }catch{previewError=true;}
+  updateExportState();
+}
+function syncPreviewMode(){
+ const button=$('previewOriginal');if(!button)return;const p=current(),position=Number($('compare').value),ready=Boolean(originalPreview)&&!previewError,mode=!ready?(previewError?'error':'loading'):previewOriginalOnly||position===100?'original':position===0?'edited':'split',label={loading:'讀取中',error:'無預覽',original:'原片',edited:'近似後製',split:'近似後製'}[mode],text=previewOriginalOnly?'返回':'原片';
+ if(button.dataset.copy!==text){button.replaceChildren(studioIcon('compare'),document.createTextNode(text));button.dataset.copy=text;}button.hidden=!ready;button.disabled=!ready||position===100&&!previewOriginalOnly;button.setAttribute('aria-pressed',String(previewOriginalOnly));button.setAttribute('aria-label',!ready?(previewError?'預覽失敗，請先重試':'預覽載入中，暫不可比較'):position===100&&!previewOriginalOnly?'目前已顯示原片；可調整前後比較滑桿':previewOriginalOnly?'返回先前'+position+'%的原片／近似後製比較':'暫看原片；不改調色參數或另存設定');button.title=button.getAttribute('aria-label');
+ const box=$('preview').closest('.comparison');box.dataset.previewMode=mode;box.querySelector('.after').hidden=!ready;box.querySelector('.after').textContent=label;$('preview').setAttribute('aria-label',(p?photoLabel(p)+'；':'')+({loading:'預覽讀取中',error:'預覽失敗，原片與編輯保留',original:'目前顯示原片',edited:'目前顯示近似後製',split:'左側原片，右側近似後製；分界'+position+'%'}[mode]));updateDirectSplit();
+}
+function setupPreviewReturn(){
+ const button=document.createElement('button');button.id='previewOriginal';button.type='button';button.className='before';button.onclick=()=>{if(!originalPreview||!current())return;previewOriginalOnly=!previewOriginalOnly;drawPreview();};document.querySelector('.comparison .before').replaceWith(button);syncPreviewMode();
 }
 async function inspectImportFile(file){
  if(!/\.(jpe?g|png|raf)$/i.test(file.name))throw new Error('不支援的格式，請使用 JPEG、PNG 或含JPEG預覽的RAF');
@@ -231,36 +261,49 @@ function setupFolderImport(){
  input.addEventListener('cancel',()=>msg('已取消資料夾選取，目前來源與編輯未變。'));
  const dialog=document.createElement('dialog');dialog.id='folderImport';dialog.className='studioDialog folderDialog';dialog.setAttribute('aria-labelledby','folderTitle');
  dialog.innerHTML='<h2 id="folderTitle">檢查資料夾</h2><p id="folderStatus" role="status" class="muted"></p><progress id="folderProgress" max="100" value="0"></progress><p id="folderRoot" hidden></p><p id="folderSummary"></p><details id="folderSources" hidden><summary id="folderSourcesTitle">來源路徑</summary><ol id="folderPaths"></ol></details><details id="folderErrors" hidden><summary id="folderErrorsTitle">失敗原因</summary><ul id="folderErrorList"></ul></details><details><summary>匯入規則與限制</summary><p>只保存相對路徑於本機。重複內容保留既有照片或依路徑排序的第一個來源，不改原有編輯。JPEG／PNG與RAF共用既有大小／尺寸檢查；RAF僅內嵌JPEG預覽。未確認前不加入，取消整批不留半批；本機寫入失敗可重試。</p></details><div id="folderSwitchGuard" hidden><p id="folderSwitchMessage" role="alert"></p><label id="folderDiscardLabel" hidden><input id="folderDiscard" type="checkbox"> 我確認放棄這些未保存的分頁變更；原檔與已保存版本保留</label></div><div class="folderActions"><button id="folderCancel">取消整批</button><button id="folderConfirm" class="primary" disabled>確認加入</button></div>';
- const overview=document.createElement('section');overview.id='folderOverview';overview.hidden=true;overview.setAttribute('aria-label','本次檔案檢查結果');dialog.querySelector('h2').after(overview);const counts=document.createElement('details');counts.id='folderCounts';const countTitle=document.createElement('summary');countTitle.textContent='完整計數';dialog.querySelector('#folderSummary').before(counts);counts.append(countTitle,dialog.querySelector('#folderSummary'));dialog.querySelector('details:not([id])').id='folderRules';document.body.append(dialog);$('folderCancel').onclick=cancelFolderImport;$('folderConfirm').onclick=commitFolderImport;$('folderDiscard').onchange=()=>{if(folderRun?.phase==='preview')updateFolderGuard(folderRun);};dialog.addEventListener('cancel',e=>{e.preventDefault();cancelFolderImport();});
- const recovery=document.createElement('section');recovery.id='folderCapacity';recovery.hidden=true;const note=document.createElement('p');note.id='folderCapacityNote';note.textContent='本機保存總量包含其他資料夾。可只在本分頁開啟這批照片，不刪舊資料；新變更在刷新或關閉後不保留。';const memory=document.createElement('button');memory.id='folderMemory';memory.textContent='僅本分頁開啟';memory.setAttribute('aria-describedby','folderCapacityNote');memory.onclick=()=>{const run=folderRun;if(!run?.capacityBlocked||run.phase!=='preview'||!updateFolderGuard(run))return;run.memoryMode=true;commitFolderImport();};recovery.append(note,memory);dialog.querySelector('.folderActions').before(recovery);
+ const overview=document.createElement('section');overview.id='folderOverview';overview.hidden=true;overview.setAttribute('aria-label','本次檔案檢查結果');dialog.querySelector('h2').after(overview);const position=document.createElement('p');position.id='folderPositionStatus';position.className='readingStatus';position.hidden=true;position.setAttribute('role','status');overview.after(position);const counts=document.createElement('details');counts.id='folderCounts';const countTitle=document.createElement('summary');countTitle.textContent='完整計數';dialog.querySelector('#folderSummary').before(counts);counts.append(countTitle,dialog.querySelector('#folderSummary'));dialog.querySelector('details:not([id])').id='folderRules';document.body.append(dialog);$('folderCancel').onclick=cancelFolderImport;$('folderConfirm').onclick=()=>{if(folderRun)folderRun.resumeRequested=null;commitFolderImport();};const resume=document.createElement('button');resume.id='folderResume';resume.hidden=true;resume.type='button';resume.onclick=()=>{const run=folderRun;if(!run||run.phase!=='preview'||!updateFolderGuard(run))return;const candidate=manualFolderResume(run);if(!candidate)return;run.resumeRequested=candidate.id;commitFolderImport();};position.after(resume);$('folderDiscard').onchange=()=>{if(folderRun?.phase==='preview')updateFolderGuard(folderRun);};dialog.addEventListener('cancel',e=>{e.preventDefault();cancelFolderImport();});
+ const recovery=document.createElement('section');recovery.id='folderCapacity';recovery.hidden=true;const note=document.createElement('p');note.id='folderCapacityNote';note.textContent='本機保存總量包含其他資料夾。可只在本分頁開啟這批照片，不刪舊資料；新變更在刷新或關閉後不保留。';const memory=document.createElement('button');memory.id='folderMemory';memory.textContent='僅本分頁開啟';memory.setAttribute('aria-describedby','folderCapacityNote');memory.onclick=()=>{const run=folderRun;if(!run?.capacityBlocked||run.phase!=='preview'||!updateFolderGuard(run))return;run.resumeRequested=null;run.memoryMode=true;commitFolderImport();};recovery.append(note,memory);dialog.querySelector('.folderActions').before(recovery);
 }
 function showFolderOverview(run){
  const box=$('folderOverview'),items=[['readable','可開啟',run.records.length,'image','folderSources'],['failed','讀取失敗',run.stats.failed,'info','folderErrors'],['duplicate','重複',run.stats.duplicates,'layers','folderCounts'],['unsupported','不支援',run.stats.ignored,'exclude','folderRules'],['unchecked','未檢查',run.stats.unprocessed,'pending','folderCounts']];box.replaceChildren();const total=document.createElement('p');total.className='folderTotal';total.textContent=run.stats.total+' 個檔案';box.append(total);const bar=document.createElement('div');bar.className='folderDistribution';bar.setAttribute('aria-hidden','true');const grid=document.createElement('div');grid.className='folderCountGrid';for(const[kind,label,count,icon,target]of items){if(count){const segment=document.createElement('span');segment.dataset.kind=kind;segment.style.flexGrow=count;bar.append(segment);}if(!count&&kind!=='readable')continue;const tile=document.createElement(count?'button':'div');tile.className='folderCount';tile.dataset.kind=kind;tile.dataset.count=String(count);const name=document.createElement('span'),number=document.createElement('strong');name.append(studioIcon(icon),document.createTextNode(label));number.textContent=String(count);tile.append(name,number);if(count){tile.type='button';tile.setAttribute('aria-label',label+' '+count+' 個；展開'+(kind==='failed'?'原因':'詳情'));tile.onclick=()=>{const details=$(target);details.open=true;focusContext(details.querySelector('summary'));};}grid.append(tile);}box.append(bar,grid);const subsets=[];if(run.stats.reconnected)subsets.push('其中 '+run.stats.reconnected+' 張銜接編輯');const raf=run.records.filter(p=>p.sourceFormat==='RAF').length;if(raf)subsets.push('RAF '+raf+' 張僅內嵌JPEG預覽，非RAW顯影');if(subsets.length){const note=document.createElement('p');note.className='folderSubsets';note.textContent=subsets.join(' · ');box.append(note);}box.hidden=false;
 }
+function manualFolderResume(run,source=run.positionSource){
+ if(run.memoryMode||!$('persist').checked||!source||run.records.some(p=>p.id===selected))return null;
+ try{const prior=JSON.parse(sessionStorage.getItem(reviewPositionKey)||'null');if(prior?.schema!==1||!/^[a-f0-9]{64}$/.test(prior.source)||!/^[a-f0-9]{64}$/.test(prior.photo)||prior.source===source)return null;const index=run.records.findIndex(p=>p.id===prior.photo);return index>0?{id:prior.photo,index,photo:run.records[index]}:null;}catch{return null;}
+}
+function showFolderPosition(run){
+ const box=$('folderPositionStatus');if(!box||folderRun!==run)return;box.hidden=true;box.replaceChildren();delete box.dataset.state;const resume=$('folderResume');resume.hidden=true;resume.disabled=true;if(!run.records.length||!run.positionSource)return;
+ let state,text;if(run.records.some(p=>p.id===selected)){state='current';text='保留目前選片';}else if(!run.memoryMode&&$('persist').checked){
+  let prior;try{prior=JSON.parse(sessionStorage.getItem(reviewPositionKey)||'null');}catch{return;}if(prior?.schema!==1||!/^[a-f0-9]{64}$/.test(prior.source)||!/^[a-f0-9]{64}$/.test(prior.photo))return;
+  const found=run.records.some(p=>p.id===prior.photo);if(found&&prior.source===run.positionSource){state='resumed';text='接續上次選片';}else if(found){state='changed';text='內容不同 · 預設首張';}else{state='missing';text='首張開始 · 未找到上次照片';}
+ }
+ if(!state)return;box.dataset.state=state;box.append(studioIcon(['current','resumed'].includes(state)?'check':'info'),document.createTextNode(text));box.setAttribute('aria-label','確認開啟後的位置：'+text);box.hidden=false;const candidate=manualFolderResume(run);if(candidate){resume.replaceChildren(studioIcon('image'),document.createTextNode('開啟並續挑 · 第 '+(candidate.index+1)+' 張'));resume.setAttribute('aria-label','開啟 '+run.records.length+' 張並續挑：'+candidate.photo.sourcePath);resume.title=candidate.photo.sourcePath;resume.hidden=false;}
+}
 function updateFolderGuard(run){
+ showFolderPosition(run);
  const ids=new Set(run.records.map(p=>p.id)),conflicted=photos.some(p=>p._conflict),unsaved=photos.filter(p=>p._dirty),leaving=unsaved.filter(p=>!ids.has(p.id));
  const persist=!run.memoryMode&&$('persist').checked,mustResolve=conflicted||(persist&&unsaved.length>0),discardRequired=!mustResolve&&!persist&&leaving.length>0;
  $('folderSwitchGuard').hidden=!mustResolve&&!discardRequired;$('folderDiscardLabel').hidden=!discardRequired;
  $('folderSwitchMessage').textContent=mustResolve?'目前有未保存變更或跨分頁衝突。請取消回工作台處理後再開啟資料夾。':discardRequired?`有 ${leaving.length} 張未保存的變更不在這個資料夾；取消可保留原工作台，繼續需明確放棄。`:'';
  const allowed=run.records.length>0&&!mustResolve&&(!discardRequired||$('folderDiscard').checked);
- $('folderConfirm').disabled=!allowed;return allowed;
+ $('folderConfirm').disabled=!allowed||run.phase==='committing';$('folderResume').disabled=!allowed||run.phase==='committing';return allowed;
 }
 function folderMessage(run,text,error=false){
  if(folderRun!==run)return;$('folderStatus').textContent=text;$('folderStatus').className=error?'message error':'muted';
 }
 function releaseFolderRun(run){
- if(folderRun!==run)return;run.records.length=0;folderRun=null;$('folderOverview').hidden=true;$('folderCapacity').hidden=true;$('folderPaths').replaceChildren();$('folderErrorList').replaceChildren();$('folderStatus').textContent='';$('folderRoot').textContent='';$('folderSummary').textContent='';$("folderImport").close();setBusy(false);if(run.controller.signal.aborted)focusContext(run.returnFocus||$(photos.length?"importTop":"choose"),{onlyIfLost:true});
+ if(folderRun!==run)return;run.records.length=0;folderRun=null;$('folderOverview').hidden=true;$('folderPositionStatus').hidden=true;$('folderPositionStatus').replaceChildren();$('folderResume').hidden=true;$('folderCapacity').hidden=true;$('folderPaths').replaceChildren();$('folderErrorList').replaceChildren();$('folderStatus').textContent='';$('folderRoot').textContent='';$('folderSummary').textContent='';$("folderImport").close();setBusy(false);if(run.controller.signal.aborted)focusContext(run.returnFocus||$(photos.length?"importTop":"choose"),{onlyIfLost:true});
 }
 function cancelFolderImport(){
  const run=folderRun;if(!run)return;run.controller.abort();
- if(run.phase==='preview'){releaseFolderRun(run);msg('已取消整批資料夾匯入；沒有加入任何照片，原有編輯保留。');}
+ if(run.phase==='preview'){releaseFolderRun(run);msg('已取消開啟 · 原片與編輯保留',false,{direct:true});}
  else{$('folderCancel').disabled=true;folderMessage(run,'正在取消整批；等待目前本機工作結束，不會加入半批。');}
 }
 async function inspectFolder(files){
  if(busy||exporting||batchApplying||folderRun)return;
  const run={returnFocus:document.activeElement,id:++folderSequence,controller:new AbortController(),phase:'checking',records:[],stats:{total:files.length,ignored:0,duplicates:0,reconnected:0,failed:0,unprocessed:0},notes:[]};folderRun=run;
  const active=()=>folderRun===run&&!run.controller.signal.aborted,seen=new Set(),sourceBatch=crypto.randomUUID(),capacity=400;
- setBusy(true);$('folderOverview').hidden=true;$('folderCounts').open=false;$('folderDiscard').checked=false;$('folderSwitchGuard').hidden=true;$('folderTitle').textContent='檢查資料夾';$('folderCancel').disabled=false;$('folderConfirm').disabled=true;$('folderSummary').textContent='';$('folderRoot').textContent='';$('folderRoot').hidden=true;for(const id of ['folderSources','folderErrors']){$(id).hidden=true;$(id).open=false;}$('folderErrorList').replaceChildren();$('folderPaths').replaceChildren();$('folderProgress').hidden=false;$('folderProgress').value=0;$('folderImport').showModal();folderMessage(run,'正在檢查你選取的資料夾；尚未加入照片。');
+ setBusy(true);$('folderResume').hidden=true;$('folderPositionStatus').hidden=true;$('folderOverview').hidden=true;$('folderCounts').open=false;$('folderDiscard').checked=false;$('folderSwitchGuard').hidden=true;$('folderTitle').textContent='檢查資料夾';$('folderCancel').disabled=false;$('folderConfirm').disabled=true;$('folderSummary').textContent='';$('folderRoot').textContent='';$('folderRoot').hidden=true;for(const id of ['folderSources','folderErrors']){$(id).hidden=true;$(id).open=false;}$('folderErrorList').replaceChildren();$('folderPaths').replaceChildren();$('folderProgress').hidden=false;$('folderProgress').value=0;$('folderImport').showModal();folderMessage(run,'正在檢查你選取的資料夾；尚未加入照片。');
  $('folderCapacity').hidden=true;$('folderMemory').disabled=false;$('folderMemory').classList.add('primary');$('folderConfirm').classList.add('primary');
  try{
   if(files.length>10000)throw new Error('資料夾超過10000個檔案，請改選較小的子資料夾；整批未加入');
@@ -283,7 +326,7 @@ async function inspectFolder(files){
    }catch(error){if(!active())break;if(error.code==='RESTORE_UNAVAILABLE')throw error;run.stats.failed++;if(run.notes.length<6)run.notes.push(path+'：'+error.message);}
    await new Promise(r=>setTimeout(r,0));
   }
-  if(!active())return;
+  if(!active())return;run.positionSource=await reviewSourceKey(run.records);if(!active())return;
   run.phase='preview';$('folderTitle').textContent='匯入檢查';$('folderProgress').hidden=true;
   $('folderSummary').textContent=`共 ${run.stats.total} 個檔案 · 可開啟 ${run.records.length} 張 · 銜接既有編輯 ${run.stats.reconnected} 張 · 內容重複 ${run.stats.duplicates} 張 · 忽略非支援檔 ${run.stats.ignored} 個 · 失敗 ${run.stats.failed} 張 · 容量上限未檢查 ${run.stats.unprocessed} 張`;
   for(const p of run.records.slice(0,8)){const li=document.createElement('li');li.textContent=p.sourcePath;$('folderPaths').append(li);}
@@ -295,38 +338,77 @@ async function inspectFolder(files){
   $('folderConfirm').textContent=`開啟 ${run.records.length} 張`;await saveQueue.catch(()=>{});updateFolderGuard(run);
  }catch(error){run.records.length=0;run.phase='preview';$('folderConfirm').disabled=true;$('folderProgress').hidden=true;folderMessage(run,error.message,true);}
  finally{
-  if(folderRun===run){if(run.controller.signal.aborted){releaseFolderRun(run);msg('已取消整批資料夾匯入；沒有加入任何照片，原有編輯保留。');}else setBusy(false);}
+  if(folderRun===run){if(run.controller.signal.aborted){releaseFolderRun(run);msg('已取消開啟 · 原片與編輯保留',false,{direct:true});}else setBusy(false);}
  }
 }
 async function commitFolderImport(){
  const run=folderRun;if(!run||run.phase!=='preview'||!run.records.length)return;
- run.phase='committing';setBusy(true);$('folderConfirm').disabled=true;$('folderMemory').disabled=true;$('folderCancel').disabled=false;folderMessage(run,'正在整批加入；完成前不會顯示部分照片。');
+ run.phase='committing';setBusy(true);$('folderConfirm').disabled=true;$('folderResume').disabled=true;$('folderMemory').disabled=true;$('folderCancel').disabled=false;folderMessage(run,'正在整批加入；完成前不會顯示部分照片。');
  try{
   await saveQueue.catch(()=>{});if(run.controller.signal.aborted)return;if(!updateFolderGuard(run)){run.phase='preview';return;}
+ const nextReviewSource=await reviewSourceKey(run.records);if(folderRun!==run||run.controller.signal.aborted)return;
+ const manualResume=run.resumeRequested?manualFolderResume(run,nextReviewSource):null;if(run.resumeRequested&&(!manualResume||manualResume.id!==run.resumeRequested))throw new Error('上次位置已改變，請重新選擇開啟方式');
   let results;
   const persisted=!run.memoryMode&&$('persist').checked;if(persisted){if(!store)throw new Error('本機資料庫無法使用，整批未加入');results=await store.insertBatch(run.records,{signal:run.controller.signal});}
   else results=run.records.map(record=>({record,inserted:true}));
   if(folderRun!==run||run.controller.signal.aborted)return;
   const fresh=new Map(run.records.map(p=>[p.id,p]));
   const replacement=results.map(({record})=>{const source=fresh.get(record.id);return {...(persisted?hydrate(record):record),name:source.name,blob:source.blob,thumb:source.thumb,width:source.width,height:source.height,metrics:source.metrics,sourceFormat:source.sourceFormat,sourceCamera:source.sourceCamera,sourcePath:source.sourcePath,sourceBatch:source.sourceBatch,demo:source.demo};});
-  const previousSelected=selected;previewToken++;originalPreview=null;releaseCanvas($('preview'));galleryGeneration++;
+ const previousSelected=selected,resumedSelection=persisted?(manualResume?.id||restoredReviewPosition(nextReviewSource,replacement)):null,resumed=Boolean(resumedSelection)&&!replacement.some(p=>p.id===previousSelected);previewToken++;originalPreview=null;releaseCanvas($('preview'));galleryGeneration++;
   for(const url of urls.values())URL.revokeObjectURL(url);urls.clear();for(const id of styledThumbs.keys())releaseStyledThumbnail(id);thumbPending.clear();
-  releaseZipArtifact();zipTasks=[];lastDecision=null;lastBatch=null;readingAction=null;toneContextStarted=false;if(run.memoryMode)$('persist').checked=false;photos=replacement;selected=photos.some(p=>p.id===previousSelected)?previousSelected:null;galleryPage=0;$('filter').value='all';
+  releaseZipArtifact();zipTasks=[];selectionUndo=null;lastDecision=null;lastBatch=null;readingAction=null;toneContextStarted=false;toneResetUndo=null;styleStrengthMemory.clear();if(run.memoryMode)$('persist').checked=false;photos=replacement;selected=photos.some(p=>p.id===previousSelected)?previousSelected:resumedSelection;activeReviewSource=nextReviewSource;if(!persisted)clearReviewPosition();galleryPage=0;$('filter').value='all';
   const root=run.records[0].sourcePath.split('/')[0];$('activeFolder').textContent=`資料夾 · ${root}`;$('activeFolder').title='本次選取，沒有持續連線或監看';$('activeFolder').hidden=false;
   const summary=`已開啟 ${replacement.length} 張 · 銜接既有編輯 ${run.stats.reconnected} 張 · 內容重複 ${run.stats.duplicates} 張 · 忽略 ${run.stats.ignored} 個 · 失敗 ${run.stats.failed} 張 · 容量上限未檢查 ${run.stats.unprocessed} 張${!persisted?'；新變更僅留本分頁。':''}`;
-  releaseFolderRun(run);render();if(photos.length)await select(selected||photos[0].id);msg(summary,run.stats.failed>0||run.stats.unprocessed>0);
+  releaseFolderRun(run);render();if(photos.length)await select(selected||photos[0].id);msg(summary+(resumed&&selected===resumedSelection?' · 回到本分頁上次選片':''),run.stats.failed>0||run.stats.unprocessed>0);if(resumed&&selected===resumedSelection&&!busy&&!folderRun){if(viewMode==='overview')focusGalleryContext();else{focusContext($('viewer'));const name=$('viewerName'),rect=name.getBoundingClientRect();if(rect.top<0||rect.bottom>innerHeight)focusContext(name,{block:'start'});}}
 
  }catch(error){if(folderRun===run&&!run.controller.signal.aborted){run.phase='preview';folderMessage(run,'整批未加入：'+error.message+'。暫存仍在，可重試或取消。',true);$('folderConfirm').disabled=false;if(error.code==='CAPACITY_LIMIT'){run.capacityBlocked=true;$('folderCapacity').hidden=false;$('folderConfirm').textContent='重試保存並開啟';$('folderConfirm').classList.remove('primary');}}}
- finally{if(folderRun===run){if(run.controller.signal.aborted){releaseFolderRun(run);msg('已取消整批資料夾匯入；沒有加入任何照片，原有編輯保留。');}else{$('folderMemory').disabled=false;setBusy(false);}}}
+ finally{if(folderRun===run){if(run.controller.signal.aborted){releaseFolderRun(run);msg('已取消開啟 · 原片與編輯保留',false,{direct:true});}else{$('folderMemory').disabled=false;updateFolderGuard(run);setBusy(false);}}}
 }
 async function exportCopy() {
-  const p=current();if(!p||exporting||toneNavigationBusy)return;const key=p.style,strength=p.strength,tone=normaliseTone(p.adjustments),controller=new AbortController();exportController=controller;exporting=true;setBusy(busy);$('exportProgress').hidden=false;$('cancelExport').hidden=false;$('cancelExport').disabled=false;$('exportWorkStatus').className='muted';msg('正在本機製作 JPEG 副本，請稍候…');
+  const p=current();if(!p||exporting||toneNavigationBusy||previewError||!originalPreview)return;const key=p.style,strength=p.strength,tone=normaliseTone(p.adjustments),controller=new AbortController();exportController=controller;exporting=true;setBusy(busy);$('exportProgress').hidden=false;$('cancelExport').hidden=false;$('cancelExport').disabled=false;$('exportWorkStatus').className='muted';msg('正在本機製作 JPEG 副本，請稍候…');
   $('cancelExport').scrollIntoView({block:'center'});
   try {
     const copy=await encodeJpegCopy(p.blob,{style:key,strength,adjustments:tone,signal:controller.signal,onProgress:progress=>{const bar=$('exportPixelProgress');bar.hidden=progress.phase!=='pixels';if(progress.phase==='pixels'){bar.value=progress.completedRows/progress.totalRows*100;$('exportWorkStatus').textContent=`「${p.name}」· 套用像素 ${Math.round(bar.value)}%（尚未完成JPEG）`;}else $('exportWorkStatus').textContent=`「${p.name}」· ${progress.phase==='encode'?'編碼JPEG（尚未完成）':'等待／解碼原片'}；使用開始時的本機參數。`;}});
     const link=document.createElement('a'),url=URL.createObjectURL(copy.blob);downloadURLs.add(url);link.href=url;link.download=`${p.name.replace(/\.[^.]+$/,'').replace(/[<>:"/\\|?*\u0000-\u001f]/g,'_')}${p.sourceFormat==='RAF'?'-raf-preview':''}-fuji-${key}-${strength}.jpg`;link.click();setTimeout(()=>{URL.revokeObjectURL(url);downloadURLs.delete(url);},60000);
     const result=`已建立 ${copy.width} × ${copy.height} JPEG 副本${p.sourceFormat==='RAF'?'（僅來自RAF內嵌JPEG，非RAW開發）':''}${copy.scaled?'（長邊已縮小至 8192）':''}，下載由瀏覽器處理。原檔未修改。`;msg(result);$('exportWorkStatus').textContent=`「${p.name}」${result}`;
   }catch(e){const cancelled=e.name==='AbortError',result=cancelled?'已取消製作，未產生新副本；原片與修改保留。':`另存失敗：${e.message}。原片與修改仍保留，可直接重試；若記憶體不足，請先關閉其他影像分頁。`;msg(result,!cancelled);$('exportWorkStatus').textContent=`「${p.name}」${result}`;$('exportWorkStatus').className=cancelled?'muted':'message error';}finally{const focus=document.activeElement,returnFocus=selected===p.id&&document.body.dataset.stage==='tone'&&(focus===document.body||focus===$('cancelExport')||focus===$('export'));exportController=null;exporting=false;$('cancelExport').hidden=true;$('exportPixelProgress').hidden=true;setBusy(busy);if(returnFocus&&!$('export').disabled){$('export').scrollIntoView({block:'center'});$('export').focus({preventScroll:true});}}
+}
+// One view-only pointer route mirrors the existing keyboard range; no photo edits are saved.
+function directSplitGeometry(){
+ const canvas=$('preview');if(!originalPreview||!canvas||canvas.hidden||!canvas.width||!canvas.height)return null;
+ const rect=canvas.getBoundingClientRect();let width=rect.width,height=rect.height;
+ if(getComputedStyle(canvas).objectFit==='contain'){const scale=Math.min(width/canvas.width,height/canvas.height);width=canvas.width*scale;height=canvas.height*scale;}
+ return {left:rect.left+(rect.width-width)/2,top:rect.top+(rect.height-height)/2,width,height};
+}
+function setDirectSplit(value){
+ const input=$('compare'),next=String(Math.round(Math.max(0,Math.min(100,value))));if(input.value===next){updateDirectSplit();return;}
+ directSplitApplying=true;try{input.value=next;input.dispatchEvent(new Event('input',{bubbles:true}));}finally{directSplitApplying=false;}
+}
+function stopDirectSplit(restore=true,render=true){
+ const drag=directSplitDrag;if(!drag)return;directSplitDrag=null;if(drag.frame)cancelAnimationFrame(drag.frame);
+ const handle=$('directCompareHandle');delete handle.dataset.dragging;try{if(handle.hasPointerCapture(drag.pointerId))handle.releasePointerCapture(drag.pointerId);}catch{}
+ if(restore){if(render)setDirectSplit(drag.startValue);else{$('compare').value=String(drag.startValue);document.documentElement.style.setProperty('--art-split',drag.startValue+'%');}}
+ updateDirectSplit();
+}
+function updateDirectSplit(){
+ const handle=$('directCompareHandle');if(!handle)return;const geometry=directSplitGeometry(),frame=$('preview').closest('.comparison');
+ if(!geometry||previewOriginalOnly||geometry.width<44||geometry.height<128){handle.hidden=true;frame.style.removeProperty('--art-split');if(directSplitDrag)stopDirectSplit(true,false);return;}
+ handle.hidden=false;const bounds=frame.getBoundingClientRect(),position=geometry.width*Number($('compare').value)/100,hitLeft=Math.max(0,Math.min(geometry.width-44,position-22)),left=geometry.left-bounds.left-frame.clientLeft;
+ handle.style.left=(left+hitLeft)+'px';handle.style.top=(geometry.top-bounds.top-frame.clientTop+geometry.height/2-22)+'px';handle.firstElementChild.style.left=(position-hitLeft)+'px';frame.style.setProperty('--art-split',(left+position)+'px');
+}
+function setupDirectCompare(){
+ const handle=document.createElement('span');handle.id='directCompareHandle';handle.hidden=true;handle.setAttribute('aria-hidden','true');handle.title='拖曳前後分界';const knob=document.createElement('span');knob.className='directCompareKnob';knob.append(studioIcon('splitDrag'));handle.append(knob);$('preview').closest('.comparison').append(handle);
+ $('compare').setAttribute('aria-controls','preview');$('compare').setAttribute('aria-description','可拖曳照片上的分界，或用此滑桿鍵盤比較；不改調色與另存設定。');
+ handle.addEventListener('pointerdown',event=>{const geometry=directSplitGeometry();if(directSplitDrag||!geometry||handle.hidden||!event.isPrimary||event.button!==0||document.querySelector('dialog[open]'))return;
+  const startValue=Number($('compare').value);directSplitDrag={pointerId:event.pointerId,photoId:selected,token:previewToken,startX:event.clientX,startValue,width:geometry.width,height:geometry.height,pending:startValue,frame:0};handle.dataset.dragging='true';$('compare').focus({preventScroll:true});try{handle.setPointerCapture(event.pointerId);}catch{directSplitDrag=null;delete handle.dataset.dragging;return;}event.preventDefault();
+ });
+ handle.addEventListener('pointermove',event=>{const drag=directSplitDrag;if(!drag||event.pointerId!==drag.pointerId)return;if(drag.photoId!==selected||drag.token!==previewToken){stopDirectSplit(true,false);return;}drag.pending=drag.startValue+(event.clientX-drag.startX)/drag.width*100;if(!drag.frame)drag.frame=requestAnimationFrame(()=>{drag.frame=0;if(directSplitDrag===drag)setDirectSplit(drag.pending);});event.preventDefault();});
+ handle.addEventListener('pointerup',event=>{const drag=directSplitDrag;if(!drag||event.pointerId!==drag.pointerId)return;if(drag.frame)cancelAnimationFrame(drag.frame);drag.frame=0;setDirectSplit(drag.startValue+(event.clientX-drag.startX)/drag.width*100);directSplitDrag=null;delete handle.dataset.dragging;try{if(handle.hasPointerCapture(event.pointerId))handle.releasePointerCapture(event.pointerId);}catch{}updateDirectSplit();event.preventDefault();});
+ for(const type of['pointercancel','lostpointercapture'])handle.addEventListener(type,event=>{if(directSplitDrag?.pointerId===event.pointerId)stopDirectSplit(true);});
+ const escape=event=>{if(event.key==='Escape'&&directSplitDrag){event.preventDefault();event.stopPropagation();stopDirectSplit(true);}};window.addEventListener('keydown',escape,true);
+ $('compare').addEventListener('input',()=>{if(directSplitDrag&&!directSplitApplying)stopDirectSplit(false,false);updateDirectSplit();});
+ const observer=new ResizeObserver(()=>{const geometry=directSplitGeometry(),drag=directSplitDrag;if(drag&&geometry&&(Math.abs(geometry.width-drag.width)>1||Math.abs(geometry.height-drag.height)>1))stopDirectSplit(true);updateDirectSplit();});observer.observe($('preview'));
+ window.addEventListener('pagehide',event=>{stopDirectSplit(true);if(!event.persisted){observer.disconnect();window.removeEventListener('keydown',escape,true);}});updateDirectSplit();
 }
 function setupToneLibrary(){
   document.querySelector('.styleHeader h3').textContent='推薦色調';const night=document.createElement('option');night.value='night';night.textContent='夜景／人工光';$('intent').append(night);
@@ -335,15 +417,17 @@ function setupToneLibrary(){
   const reference=document.createElement('div');reference.id='referenceBox';reference.className='referenceBox';reference.hidden=true;const referenceText=document.createElement('p');referenceText.id='referenceText';const clear=document.createElement('button');clear.id='clearReference';clear.textContent='清除此張參考';clear.onclick=()=>{const p=current();if(!p)return;p.referenceId=null;renderStyles();saveToneEdit(p);};reference.append(referenceText,clear);
   const details=document.createElement('details');details.id='sourceDetails';const summary=document.createElement('summary');summary.textContent='作者、參數、兼容性與來源';const detailContent=document.createElement('div');detailContent.id='sourceDetailsContent';details.append(summary,detailContent);
   const tone=document.createElement('details');tone.id='toneDetails';const toneSummary=document.createElement('summary');toneSummary.textContent='單張微調 · 本機後製';tone.append(toneSummary);
-  for(const [key,label]of [['brightness','亮度'],['warmth','暖冷'],['saturation','飽和度'],['contrast','反差']]){const control=document.createElement('label');control.className='sliderLabel';control.textContent=label;const value=document.createElement('output');value.id=`tone-${key}-value`;value.textContent='0';const input=document.createElement('input');input.id=`tone-${key}`;input.type='range';input.min=-40;input.max=40;input.step=1;input.value=0;input.setAttribute('aria-label',`${label}（本機微調）`);input.oninput=()=>{const p=current();if(!p)return;p.adjustments={...normaliseTone(p.adjustments),[key]:Number(input.value)};p._dirty=true;value.textContent=Number(input.value)>0?'+'+input.value:input.value;updateSaveState();drawPreview();};input.onchange=()=>{if(current())saveToneEdit(current());};control.append(value,input);tone.append(control);}
-  const reset=document.createElement('button');reset.id='resetTone';reset.textContent='重設微調';reset.onclick=()=>{const p=current();if(!p)return;p.adjustments=normaliseTone();renderStyles();drawPreview();saveToneEdit(p);};const note=document.createElement('p');note.className='muted';note.textContent='這些是JPEG／PNG像素調整，不等同相機白平衡、ISO或官方底片模擬。規則分數仍根據原片；不同光線需要人工比較。';tone.append(reset,note);$('styles').after(allLabel,reference,details,tone);
-  $('strength').closest('label').firstChild.textContent='本機近似強度 ';document.querySelector('.comparison .after').textContent='本機後製';
+  for(const [key,label]of [['brightness','亮度'],['warmth','暖冷'],['saturation','飽和度'],['contrast','反差']]){const control=document.createElement('label');control.className='sliderLabel';control.textContent=label;const value=document.createElement('output');value.id=`tone-${key}-value`;value.textContent='0';const input=document.createElement('input');input.id=`tone-${key}`;input.type='range';input.min=-40;input.max=40;input.step=1;input.value=0;input.setAttribute('aria-label',`${label}（本機微調）`);input.oninput=()=>{const p=current();if(!p)return;previewOriginalOnly=false;p.adjustments={...normaliseTone(p.adjustments),[key]:Number(input.value)};p._dirty=true;value.textContent=Number(input.value)>0?'+'+input.value:input.value;updateSaveState();drawPreview();};input.onchange=()=>{if(current())saveToneEdit(current());};control.append(value,input);tone.append(control);}
+  const reset=document.createElement('button');reset.id='resetTone';reset.textContent='重設微調';reset.onclick=resetPhotoTone;const undoReset=document.createElement('button');undoReset.id='undoToneReset';undoReset.hidden=true;undoReset.replaceChildren(studioIcon('undo'),document.createTextNode('復原微調'));undoReset.setAttribute('aria-label','復原此張上次重設前的四項微調');undoReset.onclick=undoPhotoToneReset;const resetActions=document.createElement('div');resetActions.className='toneResetActions';resetActions.append(reset,undoReset);const note=document.createElement('p');note.className='muted';note.textContent='這些是JPEG／PNG像素調整，不等同相機白平衡、ISO或官方底片模擬。規則分數仍根據原片；不同光線需要人工比較。';tone.append(resetActions,note);$('styles').after(allLabel,reference,details,tone);
+  setupPreviewReturn();setupDirectCompare();$('strength').closest('label').firstChild.textContent='本機近似強度 ';document.querySelector('.comparison .after').textContent='本機後製';
   const shared=document.createElement('div');shared.className='sharedToneActions';const copy=document.createElement('button');copy.id='copyTone';copy.textContent='沿用到已保留照片';copy.onclick=openBatchTone;const undo=document.createElement('button');undo.id='undoBatchTone';undo.textContent='復原上次批次';undo.disabled=true;undo.onclick=undoBatchTone;const status=document.createElement('p');status.id='batchToneStatus';status.className='muted';status.setAttribute('role','status');shared.append(copy,undo,status);tone.after(shared);
   const exportProgress=document.createElement('section');exportProgress.id='exportProgress';exportProgress.hidden=true;exportProgress.setAttribute('aria-label','副本製作進度');const exportStatus=document.createElement('p');exportStatus.id='exportWorkStatus';exportStatus.className='muted';exportStatus.setAttribute('role','status');const exportBar=document.createElement('progress');exportBar.id='exportPixelProgress';exportBar.max=100;exportBar.value=0;exportBar.hidden=true;exportBar.setAttribute('aria-label','副本像素處理進度');const cancelExport=document.createElement('button');cancelExport.id='cancelExport';cancelExport.textContent='取消製作副本';cancelExport.onclick=()=>{if(!exportController||!exporting)return;exportController.abort();cancelExport.disabled=true;exportStatus.textContent='正在取消；已開始的原生解碼／JPEG編碼可能需要稍等。';};exportProgress.append(exportStatus,exportBar,cancelExport);$('export').after(exportProgress);
   const dialog=document.createElement('dialog');dialog.id='batchTone';dialog.className='studioDialog';dialog.setAttribute('aria-labelledby','batchToneTitle');const header=document.createElement('div');header.className='comparisonHeader';const title=document.createElement('h2');title.id='batchToneTitle';title.textContent='批次沿用';const cancel=document.createElement('button');cancel.id='cancelBatchTone';cancel.textContent='取消';cancel.onclick=closeBatchTone;header.append(title,cancel);const profileSummary=document.createElement('p');profileSummary.id='batchProfileSummary';profileSummary.className='referenceBox';const notice=document.createElement('p');notice.className='muted';notice.textContent='範圍：其他已保留照片，含總覽其他頁。僅取代勾選照片的色調、強度與四項微調；相機參考與選片標記不變。前6張為縮圖預覽，效果請逐張確認。上次沿用可在本分頁復原，原檔不變。';const list=document.createElement('div');list.id='batchToneList';const apply=document.createElement('button');apply.id='applyBatchTone';apply.className='primary';apply.onclick=applyBatchTone;dialog.append(header,profileSummary,notice,list,apply);dialog.addEventListener('cancel',event=>{if(batchApplying)event.preventDefault();else closeBatchTone();});document.body.append(dialog);const batchInsets=new ResizeObserver(updateBatchInsets);batchInsets.observe(header);batchInsets.observe(apply);
 }
 // Original generic SVG geometry; no external icon/font asset or requests.
 const studioPaths={
+ splitDrag:['M9 8l-4 4 4 4M15 8l4 4-4 4M12 6v12'],
+ sun:['M17 12a5 5 0 1 1-10 0 5 5 0 0 1 10 0','M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5 19 19M5 19l1.5-1.5M17.5 6.5 19 5'],moon:['M20 15a9 9 0 0 1-11-11 9 9 0 1 0 11 11'],
  horizon:['M2 12h20'],import:['M12 3v12m-4-4 4 4 4-4','M5 15v5h14v-5'],download:['M12 3v12m-4-4 4 4 4-4','M5 19h14'],
  check:['M5 12l4 4L19 6'],exclude:['M6 6l12 12M18 6 6 18'],pending:['M12 8v5','M12 17h.01','M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0'],
  left:['M19 12H5m6-6-6 6 6 6'],right:['M5 12h14m-6-6 6 6-6 6'],down:['M6 9l6 6 6-6'],folder:['M3 6h7l2 3h9v12H3z','M3 6V3h7l2 3'],undo:['M8 5 3 10l5 5','M3 10h11a6 6 0 0 1 0 12'],
@@ -358,7 +442,7 @@ function readingButton(id,icon,label,accessible){const b=typeof id==='string'?$(
 let mobileCanvasObserver,readingPreviewSlot,readingCompareSlot,readingExportSlot,readingProgressSlot,readingSessionSlots=[],readingReviewSlot,readingHeadingText,readingDecisionSlots=[],readingToneSlots=[];
 function placeReadingDecisions(){const bar=$('reviewDecisionBar');if(!bar)return;const readable=readingLayout==='readable';for(const{node,marker}of readingDecisionSlots){if(readable){if(node.parentElement!==bar)bar.append(node);}else if(node.parentElement===bar)marker.after(node);}bar.hidden=!readable||document.body.dataset.stage==='tone';}
 function openReadingRecoveryOptions(){if(readingLayout==='readable'&&$('sessionTools'))$('sessionTools').open=true;}
-function placeReadingMessage(){if(!readingMessageMarker||!$('sessionTools'))return;const node=$('message');if(readingLayout==='readable'&&photos.length&&!node.classList.contains('error'))$('sessionTools').append(node);else readingMessageMarker.after(node);}
+function placeReadingMessage(){if(!readingMessageMarker||!$('sessionTools'))return;const node=$('message');if(readingLayout==='readable'&&photos.length&&!node.classList.contains('error')&&node.dataset.directFeedback!=='true')$('sessionTools').append(node);else readingMessageMarker.after(node);}
 function setButtonBusy(id,value){const button=typeof id==='string'?$(id):id;if(!button)return;if(value)button.setAttribute('aria-busy','true');else button.removeAttribute('aria-busy');}
 function describeDisabled(id,reason){const button=$(id);if(!button)return;if(button.disabled&&reason){button.setAttribute('aria-description',reason);button.title=reason;button.dataset.disableReason='true';}else{button.removeAttribute('aria-description');if(button.dataset.disableReason){button.removeAttribute('title');delete button.dataset.disableReason;}}}
 function placeReadingSessionTools(){if(!$('sessionTools'))return;const readable=readingLayout==='readable';for(const{node,marker}of readingSessionSlots){if(readable&&(!node.classList.contains('privacy')||photos.length))$('sessionTools').append(node);else marker.after(node);}$('sessionTools').hidden=!readable;const heading=document.querySelector('.toolbar h2');if(readable){heading.append($('reviewProgress'));if(heading.firstChild?.nodeType===Node.TEXT_NODE)heading.firstChild.textContent='照片 ';$('reviewProgress').textContent='待決 '+photos.filter(p=>p.decision==='pending').length;}else{readingReviewSlot.after($('reviewProgress'));if(heading.firstChild?.nodeType===Node.TEXT_NODE)heading.firstChild.textContent=readingHeadingText;}}
@@ -370,7 +454,7 @@ function updateToneInsets(){
  document.documentElement.dataset.toneToolsPinned=String(active&&room>=Math.max(200,innerHeight*.3));
  updateToneInlineVisibility();
 }
-function placeReadingCanvas(){if(!readingPreviewSlot)return;const box=$('mobileCanvas'),preview=$('preview').closest('.comparison'),slider=$('compare').closest('label'),active=readingLayout==='readable'&&studioIdentity==='contact'&&document.body.dataset.stage==='tone'&&matchMedia('(max-width:760px)').matches;if(active){box.append(preview,slider);box.hidden=false;}else{readingPreviewSlot.after(preview);readingCompareSlot.after(slider);box.hidden=true;}}
+function placeReadingCanvas(){if(!readingPreviewSlot)return;const box=$('mobileCanvas'),preview=$('preview').closest('.comparison'),slider=$('compare').closest('label'),active=readingLayout==='readable'&&studioIdentity==='contact'&&document.body.dataset.stage==='tone'&&matchMedia('(max-width:760px)').matches;const feedback=[$('previewStatus'),$('retryPreview')].filter(Boolean);if(active){for(const node of[preview,slider,...feedback])if(node.parentElement!==box)box.append(node);box.hidden=false;}else{readingPreviewSlot.after(preview);readingCompareSlot.after(slider);for(const node of feedback)if(node.parentElement!==$('viewer'))$('viewer').insertBefore(node,$('decisions'));box.hidden=true;}}
 function placeToneOrder(){
  const tray=$('toneSecondary');if(!tray)return;
  const active=readingLayout==='readable'&&studioIdentity==='contact'&&document.body.dataset.stage==='tone';
@@ -390,14 +474,32 @@ function placeReadingExport(){
  }else{if(button.parentElement!==$('decisions'))$('decisions').append(button);if($('decisions').nextSibling!==progress||progress.nextSibling!==note)$('decisions').after(progress,note);}
 }
 function applyReadingCopy(){
- if(!$('qualitySummary'))return;const readable=readingLayout==='readable',p=current();$('qualitySummary').hidden=!p;if(p){const alerts=[];if(p.metrics.sharpness<60)alerts.push('細節較少');const group=photoGroups().find(g=>g.items.includes(p)),ranked=group?.items.filter(p=>p.decision!=='exclude').sort((a,b)=>b.metrics.score-a.metrics.score)||[];if(ranked.length>1&&ranked[0].metrics.score-ranked[1].metrics.score<5)alerts.push('同組差距小');if(p.metrics.bright>.12)alerts.push('高光偏多');if(p.metrics.dark>.18)alerts.push('暗部偏多');if(p.metrics.alpha<.99)alerts.push('透明區轉白');if(p.sourceFormat==='RAF')alerts.push('RAF僅內嵌預覽');const label=(alerts.length?alerts.join(' · ')+' · ':'')+'人物與表情未分析';$('qualitySummary').replaceChildren(studioIcon('info'),document.createTextNode(label));$('qualitySummary').setAttribute('aria-label',label+'；縮圖規則不代表人物或美感判斷');
+ if(!$('qualitySummary'))return;const readable=readingLayout==='readable',p=current();$('qualitySummary').hidden=!p;if(p){const alerts=[];if(p.metrics.sharpness<60)alerts.push(['detail','image','細節較少']);const group=photoGroups().find(g=>g.items.includes(p)),ranked=group?.items.filter(p=>p.decision!=='exclude').sort((a,b)=>b.metrics.score-a.metrics.score)||[];if(ranked.length>1&&ranked[0].metrics.score-ranked[1].metrics.score<5)alerts.push(['group','layers','同組差距小']);if(p.metrics.bright>.12)alerts.push(['bright','sun',`高光偏多 ${Math.round(p.metrics.bright*100)}%`]);if(p.metrics.dark>.18)alerts.push(['dark','moon',`暗部偏多 ${Math.round(p.metrics.dark*100)}%`]);if(p.metrics.alpha<.99)alerts.push(['alpha','layers','透明區轉白']);if(p.sourceFormat==='RAF')alerts.push(['raf','image','RAF僅內嵌預覽']);alerts.push(['unanalysed',null,'人物與表情未分析']);const label=alerts.map(item=>item[2]).join(' · ');$('qualitySummary').replaceChildren(...alerts.map(([kind,icon,text])=>{const signal=document.createElement('span');signal.className='qualitySignal';signal.dataset.qualityKind=kind;if(icon)signal.append(studioIcon(icon));signal.append(document.createTextNode(text+' '));return signal;}));$('qualitySummary').setAttribute('aria-label',label+'；比例來自縮圖亮度範圍，規則不代表對焦、人物或美感判斷');
   const reason=sourceCategory==='app'?localStyleSuggestions(p).reason:sourceCategory==='lut'?'尚未提供LUT，不下載付費或來源不明預設。':'相機參考不套用到JPEG，未分析人物或閃燈。';$('recommendationExplanation').textContent=reason;if(readable)$('styleReason').textContent=sourceCategory==='app'?'本機近似':sourceCategory==='lut'?'尚未提供 LUT':'機內參考 · 不套用至 JPEG';
  }
  const note=$('originalExportNote');if(note){if(readable)$('exportInfo').append(note);else $('exportNoteMarker').before(note);}
  const short=$('exportShortNote');if(short){const text=(p?.sourceFormat==='RAF'?'sRGB 內嵌JPEG副本 · 原片不變':'sRGB JPEG 副本 · 原片不變')+($('persist').checked?'':' · 本分頁，關閉／刷新不保留新變更');if(short.dataset.copyKey!==text){short.replaceChildren(studioIcon('lock'),document.createTextNode(text));short.dataset.copyKey=text;}}
  updateToneState();
 }
+function toneResetSnapshot(p){
+ const s=toneResetUndo;if(!s||s.photoId!==p?.id)return null;
+ if(p._conflict||JSON.stringify(editsOf(p))!==s.after||(s.ready&&p.revision!==s.revision)){toneResetUndo=null;return null;}return s;
+}
+function toneResetBlocked(p){return !p||busy||exporting||batchApplying||decisionBusy||toneNavigationBusy||savingSession||!originalPreview||(photoSaveJobs.get(p)||0)>0||Boolean(p._conflict);}
+function updateToneResetControls(){
+ const reset=$('resetTone'),undo=$('undoToneReset');if(!reset||!undo)return;const p=current(),s=toneResetSnapshot(p),blocked=toneResetBlocked(p);reset.disabled=blocked||!Object.values(normaliseTone(p?.adjustments)).some(Boolean);undo.hidden=!s;undo.disabled=blocked||!s?.ready;describeDisabled('resetTone',blocked?'先完成目前處理、預覽或保存衝突':'四項微調已為0');describeDisabled('undoToneReset',blocked||!s?.ready?'先完成目前處理或保存':'');
+}
+async function resetPhotoTone(){
+ const p=current();if(toneResetBlocked(p)||document.querySelector('dialog[open]')||!Object.values(normaliseTone(p.adjustments)).some(Boolean))return;
+ const s={photoId:p.id,before:normaliseTone(p.adjustments),ready:false};previewOriginalOnly=false;p.adjustments=normaliseTone();s.after=JSON.stringify(editsOf(p));toneResetUndo=s;renderStyles();drawPreview();
+ try{const saved=await saveToneEdit(p);if(saved&&selected===p.id&&toneResetUndo===s)msg('已重設此張微調；可復原上次重設。');}
+ finally{if(toneResetUndo===s){if(JSON.stringify(editsOf(p))===s.after&&!p._conflict){s.revision=p.revision;s.ready=true;}else toneResetUndo=null;}updateToneResetControls();}
+}
+async function undoPhotoToneReset(){
+ const p=current(),s=toneResetSnapshot(p);if(!s?.ready||toneResetBlocked(p)||document.querySelector('dialog[open]'))return;const hadFocus=document.activeElement===$('undoToneReset');toneResetUndo=null;previewOriginalOnly=false;p.adjustments={...s.before};renderStyles();drawPreview();const saved=await saveToneEdit(p);if(saved&&selected===p.id)msg($('persist').checked?'已復原此張微調；參數已存。':'已復原此張微調；僅留本分頁。');if(hadFocus&&selected===p.id&&!document.querySelector('dialog[open]')&&[document.body,$('undoToneReset')].includes(document.activeElement))focusContext($('resetTone').disabled?$('toneDetails').querySelector('summary'):$('resetTone'));
+}
 function updateToneState(){
+ updateToneResetControls();
  const box=$('toneState'),p=current();if(!box)return;
  box.hidden=!p||readingLayout!=='readable'||document.body.dataset.stage!=='tone';if(!p)return;
  const modified=Object.values(normaliseTone(p.adjustments)).some(Boolean),style=(styles[p.style]?.name||styles.original.name)+(p.style==='original'?'':' '+p.strength+'%')+(modified?' · 微調':'');
@@ -417,11 +519,11 @@ function setupToneState(){
  inline.addEventListener('toggle',()=>{if(inline.hidden)return;if(inline.open){returnInput=lastInput;returnPhoto=current()?.id;returnPosition=scrollY;inline.scrollIntoView({block:'start',behavior:'instant'});}else if(returnPhoto===current()?.id&&document.body.dataset.stage==='tone'){if(returnInput?.isConnected)focusContext(returnInput);else{scrollTo({top:returnPosition,behavior:'instant'});summary.focus({preventScroll:true});}}});
 }
 function applyReadingUI(){
- const p=current();for(const[id,icon,text,aria]of [['importTop','folder','資料夾','開啟本機資料夾'],['choose','folder','開啟資料夾','開啟本機資料夾'],['keep','check','保留','保留 K'],['exclude','exclude','排除','排除 X'],['resetDecision','pending','待定','待決定 U'],['nextPending','right','下一張'],['undoDecision','undo','復原','復原標記 Z'],['compareGroup','compare','比較','並列比較相似候選'],['editTone','sliders','調色','調色與匯出'],['overviewReturn','grid','總覽','全部照片'],['backToPhoto','image','照片','回照片'],['save','save','保存','儲存工作階段'],['exportZip','archive','ZIP','打包已保留照片 · ZIP'],['groupToggle','layers',grouped?'分組：開':'分組：關'],['view-overview','grid','','照片總覽'],['view-focus','image','','專注選片'],['copyTone','copy','批次沿用'],['undoBatchTone','undo','復原沿用'],['prevKeptTone','left','上一張'],['nextKeptTone','right','下一張'],['prevPhotoPage','left','上一頁'],['nextPhotoPage','right','下一頁'],['prevCompareGroup','left','上一組'],['nextCompareGroup','right','下一組'],['closeComparison','close','關閉','關閉比較'],['export','download',p?.sourceFormat==='RAF'?'另存內嵌預覽':'另存 JPEG',p?.sourceFormat==='RAF'?'另存RAF內嵌預覽JPEG副本，非RAW開發':'另存風格JPEG副本']])readingButton(id,icon,text,aria);
+ const p=current();for(const[id,icon,text,aria]of [['importTop','folder','資料夾','開啟本機資料夾'],['choose','folder','開啟資料夾','開啟本機資料夾'],['keep','check','保留','保留 K'],['exclude','exclude','排除','排除 X'],['resetDecision','pending','待定','待決定 U'],['nextPending','right','下一待定','下一張尚待決定的照片'],['undoDecision','undo','復原','復原標記 Z'],['compareGroup','compare','比較','並列比較相似候選'],['editTone','sliders','調色','調色與匯出'],['overviewReturn','grid','總覽','全部照片'],['backToPhoto','image','照片','回照片'],['save','save','保存','儲存工作階段'],['exportZip','archive','ZIP','打包已保留照片 · ZIP'],['groupToggle','layers',grouped?'分組：開':'分組：關'],['view-overview','grid','','照片總覽'],['view-focus','image','','專注選片'],['copyTone','copy','批次沿用'],['undoBatchTone','undo','復原沿用'],['prevKeptTone','left','上一張'],['nextKeptTone','right','下一張'],['prevPhotoPage','left','上一頁'],['nextPhotoPage','right','下一頁'],['prevCompareGroup','left','上一組'],['nextCompareGroup','right','下一組'],['closeComparison','close','關閉','關閉比較'],['export','download',p?.sourceFormat==='RAF'?'另存內嵌預覽':'另存 JPEG',p?.sourceFormat==='RAF'?'另存RAF內嵌預覽JPEG副本，非RAW開發':'另存風格JPEG副本']])readingButton(id,icon,text,aria);
  for(const b of document.querySelectorAll('.comparisonKeep'))readingButton(b,'check',b.textContent.replace(/^\s+|\s+$/g,''));
  if(readingLayout==='readable'&&$('decisionHint')){const text=(readingAction?((readingAction.photoId&&readingAction.photoId!==selected?'上次 · ':'')+readingAction.label):'')||(readyForKeptTone()?`保留 ${photos.filter(p=>p.decision==='keep').length} 張 · 可開始調色`:photos.length&&!photos.some(p=>p.decision==='pending')?'無保留照片 · 可復原':'標記可復原');$('decisionHint').replaceChildren(studioIcon(readingAction?.error?'info':readingAction?.busy?'pending':readingAction?'check':'info'),document.createTextNode(text));$('decisionHint').classList.toggle('error',Boolean(readingAction?.error));}
  if($('decisionHint'))$('decisionHint').hidden=readingLayout==='readable'&&!readingAction&&!readyForKeptTone()&&photos.some(p=>p.decision==='pending');
- applyReadingCopy();placeReadingExport();placeReadingSessionTools();placeReadingMessage();applyContactIdentity();placeReadingCanvas();placeReadingDecisions();placeToneOrder();
+ applyReadingCopy();placeReadingExport();placeReadingSessionTools();placeReadingMessage();applyContactIdentity();placeReadingCanvas();placeReadingDecisions();placeToneOrder();updateWorkbenchFlow();
 }
 function setupContactIdentity(){
  const intro=document.querySelector('.intro h1'),lead=document.querySelector('.intro .lead');intro.dataset.compactHtml=intro.innerHTML;lead.dataset.compactText=lead.textContent;const proof=document.createElement('div');proof.id='contactProof';proof.setAttribute('role','img');proof.setAttribute('aria-label','本機照片流程：開啟資料夾、比較挑片、另存副本');for(let i=1;i<=3;i++){const frame=document.createElement('div'),number=document.createElement('span');frame.className='proofPlaceholder';number.className='proofNumber';number.textContent=['開啟','挑片','另存'][i-1];frame.append(studioIcon(['folder','compare','download'][i-1]),number);proof.append(frame);}const caption=document.createElement('p');caption.className='proofCaption';caption.textContent='';caption.hidden=true;proof.append(caption);document.querySelector('.intro .session').prepend(proof);
@@ -488,7 +590,7 @@ function setupReviewUI(){
   const lookTools=document.createElement('div');lookTools.className='galleryLookTools';const lookLabel=document.createElement('label'),lookToggle=document.createElement('input');lookToggle.type='checkbox';lookToggle.id='galleryUseTone';lookToggle.checked=galleryUseTone;lookToggle.onchange=()=>{galleryUseTone=lookToggle.checked;rememberReviewPreferences();render();};lookLabel.append(lookToggle,document.createTextNode(' 顯示本機調色'));const lookStatus=document.createElement('span');lookStatus.id='galleryLookStatus';lookStatus.setAttribute('role','status');const retryLooks=document.createElement('button');retryLooks.id='retryGalleryLooks';retryLooks.textContent='重試縮圖';retryLooks.hidden=true;retryLooks.onclick=()=>render();lookTools.append(lookLabel,lookStatus,retryLooks);galleryPanel.prepend(lookTools);
   const viewer=document.createElement('section');viewer.id='viewer';viewer.tabIndex=-1;document.querySelector('.desk').insertBefore(viewer,$('editor'));
   const heading=document.createElement('div');heading.className='viewerHead';const title=document.createElement('h2');title.id='viewerName';title.textContent='選一張照片';const back=document.createElement('button');back.id='overviewReturn';back.textContent='← 全部照片';back.onclick=()=>{render({revealSelection:true});setViewMode('overview');focusGalleryContext();};heading.append(title,back);viewer.append(heading,document.querySelector('.comparison'),$('compare').closest('label'),$('dimensions'),$('decisions'));
-  const next=document.createElement('button');next.id='nextPending';next.textContent='下一張 →';next.onclick=()=>goNextPending();
+  const next=document.createElement('button');next.id='nextPending';next.textContent='下一待定 →';next.onclick=()=>goNextPending();
   const undo=document.createElement('button');undo.id='undoDecision';undo.textContent='復原標記 Z';undo.setAttribute('aria-keyshortcuts','Z');undo.onclick=undoLastDecision;$('decisions').append(next,undo);
   const hint=document.createElement('p');hint.id='decisionHint';hint.className='decisionHint';hint.setAttribute('role','status');viewer.append(hint);
   const placeholder=document.createElement('img');placeholder.id='previewPlaceholder';placeholder.alt='目前照片的本機縮圖，完整預覽準備中';placeholder.hidden=true;document.querySelector('.comparison').prepend(placeholder);const previewStatus=document.createElement('p');previewStatus.id='previewStatus';previewStatus.setAttribute('role','status');previewStatus.hidden=true;const retry=document.createElement('button');retry.id='retryPreview';retry.textContent='重試預覽';retry.hidden=true;retry.onclick=()=>select(selected);viewer.insertBefore(previewStatus,$('decisions'));viewer.insertBefore(retry,$('decisions'));
@@ -540,12 +642,12 @@ async function navigateKeptTone(offset){
 }
 function pendingAfter(id){const start=photos.findIndex(p=>p.id===id);for(let offset=1;offset<photos.length;offset++){const p=photos[(start+offset+photos.length)%photos.length];if(p.decision==='pending')return p;}}
 function readyForKeptTone(){return photos.length>0&&!photos.some(p=>p.decision==='pending')&&photos.some(p=>p.decision==='keep');}
-function updateDecisionControls(){
+function updateDecisionControls(){updateSelectionEntry();updateWorkbenchFlow();
  for(const id of ['keep','exclude','resetDecision','undoDecision'])setButtonBusy(id,decisionBusy&&readingAction?.control===id);
   if($('exportZip'))$('exportZip').disabled=busy||exporting||batchApplying||toneNavigationBusy||!photos.some(p=>p.decision==='keep'&&!p._conflict);
   if(!$('nextPending'))return;const disabled=decisionBusy||batchApplying||toneNavigationBusy||!current()||!originalPreview;
   for(const id of ['keep','exclude','resetDecision'])$(id).disabled=disabled;
-  const finish=readyForKeptTone();$('nextPending').disabled=disabled||(!pendingAfter(selected)&&!finish);$('nextPending').classList.toggle('primary',finish);if(readingLayout==='compact')$('nextPending').textContent=finish?(resumeKeptTone()?'繼續調色':'開始調色'):'→ 下一張';$('undoDecision').disabled=decisionBusy||toneNavigationBusy||!lastDecision;if($('compareGroup'))$('compareGroup').disabled=disabled;
+  const finish=readyForKeptTone();$('nextPending').disabled=disabled||(!pendingAfter(selected)&&!finish);$('nextPending').classList.toggle('primary',finish);if(readingLayout==='compact')$('nextPending').textContent=finish?(resumeKeptTone()?'繼續調色':'開始調色'):'→ 下一待定';$('undoDecision').disabled=decisionBusy||toneNavigationBusy||!lastDecision;if($('compareGroup'))$('compareGroup').disabled=disabled;
   if($('copyTone')){$('copyTone').disabled=disabled||exporting||!photos.some(p=>p.id!==selected&&p.decision==='keep'&&!p._conflict);$('undoBatchTone').disabled=batchApplying||!lastBatch;}
   const wait=decisionBusy?'正在保存標記':batchApplying?'正在沿用批次':toneNavigationBusy?'正在切換照片':!current()?'先開啟資料夾並選照片':previewError?'預覽失敗，請先重試':!originalPreview?'正在載入照片':'';
   for(const id of ['keep','exclude','resetDecision','compareGroup'])describeDisabled(id,wait);describeDisabled('nextPending',wait||'沒有下一張待定照片');describeDisabled('undoDecision',decisionBusy?'正在保存標記':toneNavigationBusy?'正在切換照片':'尚無可復原標記');
@@ -752,7 +854,7 @@ async function runZipBatch(){
  for(const id of ['zipStart','zipNext','zipRetry','zipDownload'])$(id).hidden=true;$('zipCancel').hidden=false;$('zipCancel').disabled=false;$('zipStatus').className='muted';$('zipStatus').textContent='正在本機準備ZIP；尚未完成，也尚未開始下載。';$('zipProgress').hidden=true;
  try{
   const module=await (zipModulePromise??=import('./zip.js'));const result=await module.buildZipBatch(zipTasks,{signal:controller.signal,onProgress:step=>{
-   $('zipStatus').textContent=`已完成 ${step.completed} 張 · 失敗 ${step.failed} 張 · 本輪待處理 ${step.total} 張\n${step.filename} · ${{photo:'準備副本',decode:'等待／解碼',pixels:'套用本機調色',encode:'編碼JPEG',archive:'封裝完整JPEG'}[step.phase]||'處理中'}（本包尚未完成）`;
+   $('zipStatus').textContent=`已完成 ${step.completed} 張 · 失敗 ${step.failed} 張 · 本輪共 ${step.total} 張\n${step.filename} · ${{photo:'準備副本',decode:'等待／解碼',pixels:'套用本機調色',encode:'編碼JPEG',archive:'封裝完整JPEG'}[step.phase]||'處理中'}（本包尚未完成）`;
    $('zipProgress').hidden=step.phase!=='pixels';if(step.phase==='pixels')$('zipProgress').value=step.completedRows/step.totalRows*100;
   }});
   for(const item of result.completed){const task=zipTasks.find(t=>t.id===item.id);task.status='done';}
@@ -768,7 +870,7 @@ async function runZipBatch(){
 function setupZipExport(){
  const open=document.createElement('button');open.id='exportZip';open.textContent='打包已保留照片 · ZIP';document.querySelector('.toolbar .filters').append(open);open.onclick=openZipExport;
  const dialog=document.createElement('dialog');dialog.id='zipExport';dialog.className='studioDialog zipDialog';dialog.setAttribute('aria-labelledby','zipTitle');
- dialog.innerHTML='<div class="dialogHead"><h2 id="zipTitle">打包保留照片</h2><button id="zipClose" aria-label="關閉批次輸出">關閉</button></div><p class="muted">輸出每張各自調色的JPEG副本，不含原檔／EXIF／GPS。RAF僅輸出內嵌JPEG預覽，非官方RAW轉檔；相機配方不會自動套用。</p><details class="zipLimits"><summary>容量、取消與資料保護</summary><p class="muted">逐張處理，每包最多20張／64 MiB。封裝可能短暫保留兩份ZIP緩衝，加上單張解碼記憶體；若資源不足請減少選取。分包與取消可繼續，關閉視窗或刷新需重新選取，已下載檔案保留。檔案先留在記憶體，只有按下載才交給瀏覽器；本工具無法確認磁碟存檔成功。</p></details><section id="zipSelection"><div class="zipSelectionTools"><button id="zipSelectAll">全選</button><button id="zipSelectNone">全不選</button><span id="zipSelectionCount" class="muted"></span></div><div id="zipList" class="zipList"></div><button id="zipStart" class="primary full">製作第一包</button></section><p id="zipStatus" role="status" aria-live="polite" class="muted"></p><progress id="zipProgress" aria-label="目前照片的像素處理進度" max="100" hidden></progress><div class="zipActions"><button id="zipCancel" hidden>取消剩餘處理</button><button id="zipDownload" class="primary" hidden>下載本包ZIP</button><button id="zipNext" hidden>製作下一包</button><button id="zipRetry" hidden>重試失敗照片</button></div><details id="zipResultDetails"><summary>逐張結果與未處理清單</summary><ul id="zipResults"></ul></details>';
+ dialog.innerHTML='<div class="dialogHead"><h2 id="zipTitle">打包保留照片</h2><button id="zipClose" aria-label="關閉批次輸出">關閉</button></div><p class="muted">輸出每張各自調色的JPEG副本，不含原檔／EXIF／GPS。RAF僅輸出內嵌JPEG預覽，非官方RAW轉檔；相機配方不會自動套用。</p><details class="zipLimits"><summary>容量、取消與資料保護</summary><p class="muted">逐張處理，每包最多20張／64 MiB。封裝可能短暫保留兩份ZIP緩衝，加上單張解碼記憶體；若資源不足請減少選取。分包與取消可繼續，關閉視窗或刷新需重新選取，已下載檔案保留。檔案先留在記憶體，只有按下載才交給瀏覽器；本工具無法確認磁碟存檔成功。</p></details><section id="zipSelection"><div class="zipSelectionTools"><button id="zipSelectAll">全選</button><button id="zipSelectNone">全不選</button><span id="zipSelectionCount" class="muted"></span></div><button id="zipStart" class="primary full">製作第一包</button><div id="zipList" class="zipList"></div></section><p id="zipStatus" role="status" aria-live="polite" class="muted"></p><progress id="zipProgress" aria-label="目前照片的像素處理進度" max="100" hidden></progress><div class="zipActions"><button id="zipCancel" hidden>取消剩餘處理</button><button id="zipDownload" class="primary" hidden>下載本包ZIP</button><button id="zipNext" hidden>製作下一包</button><button id="zipRetry" hidden>重試失敗照片</button></div><details id="zipResultDetails"><summary>逐張結果與未處理清單</summary><ul id="zipResults"></ul></details>';
  document.body.append(dialog);$('zipClose').onclick=closeZipExport;dialog.addEventListener('cancel',event=>{event.preventDefault();closeZipExport();});$('zipStart').onclick=startZipSelection;
  dialog.addEventListener('keydown',event=>{if(event.key!=='Tab')return;const controls=[...dialog.querySelectorAll('button,input,summary,[tabindex]')].filter(node=>!node.disabled&&node.getClientRects().length&&node.tabIndex>=0),first=controls[0],last=controls.at(-1);if(event.shiftKey&&document.activeElement===first){event.preventDefault();last?.focus();}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first?.focus();}});
  for(const [id,checked]of [['zipSelectAll',true],['zipSelectNone',false]])$(id).onclick=()=>{for(const input of $('zipList').querySelectorAll('input:not(:disabled)'))input.checked=checked;updateZipSelection();};
@@ -784,15 +886,15 @@ $('filter').onchange=()=>{galleryPage=0;render();};$('groupToggle').onclick=()=>
 for(const [id,decision] of Object.entries({keep:'keep',exclude:'exclude',resetDecision:'pending'}))$(id).onclick=()=>decide(decision);
 window.addEventListener('keydown',event=>{
   if(document.querySelector('dialog[open]')||event.ctrlKey||event.metaKey||event.altKey||event.repeat||event.target.closest?.('input,textarea,select,[contenteditable="true"]'))return;
-  const key=event.key.toLowerCase();if(!photos.length)return;
+  const key=event.key.toLowerCase();if(!photos.length)return;if(key==='escape'&&previewOriginalOnly){event.preventDefault();previewOriginalOnly=false;drawPreview();$('previewOriginal').focus({preventScroll:true});return;}
   if(['k','x','u','z','arrowright','escape'].includes(key))event.preventDefault();
   if(key==='k')decide('keep');else if(key==='x')decide('exclude');else if(key==='u')decide('pending');else if(key==='z')undoLastDecision();else if(key==='arrowright')goNextPending();else if(key==='escape')setViewMode('overview');
 });
-$('strength').oninput=()=>{const p=current();if(p){p.strength=Number($('strength').value);p._dirty=true;updateSaveState();$('strengthValue').textContent=p.strength+'%';drawPreview();}};
-$('strength').onchange=()=>{if(current())saveToneEdit(current());};$('compare').oninput=drawPreview;
+$('strength').oninput=()=>{const p=current();if(p){previewOriginalOnly=false;p.strength=Number($('strength').value);p._dirty=true;updateSaveState();$('strengthValue').textContent=p.strength+'%';drawPreview();}};
+$('strength').onchange=()=>{if(current())saveToneEdit(current());};$('compare').oninput=()=>{previewOriginalOnly=false;drawPreview();};
 $('intent').onchange=()=>{if(current()){current().intent=$('intent').value;renderStyles();saveToneEdit(current());}};
 $('export').onclick=exportCopy;
-$('persist').onchange=()=>{updateSaveState();applyReadingCopy();msg($('persist').checked?'本機保存已開啟；按「儲存工作階段」保存目前照片。':'已關閉後續本機保存；先前保存資料仍在此瀏覽器，未自動刪除。');};
+$('persist').onchange=()=>{if(!$('persist').checked)clearReviewPosition();else rememberReviewPosition();updateSaveState();applyReadingCopy();msg($('persist').checked?'本機保存已開啟；按「儲存工作階段」保存目前照片。':'已關閉後續本機保存；先前保存資料仍在此瀏覽器，未自動刪除。');};
 $('save').onclick=async()=>{
   if(savingSession)return;
   if(!$('persist').checked){msg('請先勾選「在此瀏覽器保存」，再儲存工作階段。');return;}
@@ -820,9 +922,90 @@ for(const [id,preferLocal] of [['conflictLocal',true],['conflictSaved',false]])$
   }catch(error){msg(`版本處理失敗：${error.message}，本分頁修改仍保留。`,true);}
   finally{$('conflictLocal').disabled=$('conflictSaved').disabled=false;updateSaveState();}
 };
+function setupSelectionDraft(){
+ const entry=document.createElement('button');entry.id='selectionDraft';entry.append(studioIcon('layers'),document.createTextNode('選片草案'));entry.onclick=openSelectionDraft;const restore=document.createElement('button');restore.id='selectionRestore';restore.hidden=true;restore.textContent='復原草案';restore.onclick=openSelectionUndo;document.querySelector('.toolbar .filters').prepend(entry,restore);
+ const dialog=document.createElement('dialog');dialog.id='selectionDialog';dialog.setAttribute('aria-labelledby','selectionTitle');
+ dialog.innerHTML='<h2 id="selectionTitle">先挑一份草案</h2><p id="selectionNotice">細節／曝光規則，不是AI審美。只保留你勾選的照片，其餘待定。</p><p id="selectionSummary" role="status"></p><div id="selectionList"></div><nav id="selectionPager" aria-label="草案分頁"><button id="selectionPrev">上一頁</button><span id="selectionPage" role="status"></span><button id="selectionNext">下一頁</button></nav><p id="selectionStatus" role="status" aria-live="polite"></p><div class="selectionActions"><button id="selectionCancel">取消</button><button id="selectionRecover" hidden>處理保存</button><button id="selectionUndo" hidden>復原本次保留</button><button id="selectionTone" hidden>逐張調色</button><button id="selectionApply" class="primary">保留勾選照片</button></div>';
+ dialog.querySelector('#selectionList').before(dialog.querySelector('#selectionStatus'),dialog.querySelector('.selectionActions'));document.body.append(dialog);$('selectionCancel').onclick=closeSelectionDraft;$('selectionApply').onclick=applySelectionDraft;$('selectionUndo').onclick=undoSelectionDraft;
+ $('selectionPrev').onclick=()=>{selectionRun.page--;renderSelectionDraft(true);};$('selectionNext').onclick=()=>{selectionRun.page++;renderSelectionDraft(true);};
+ $('selectionTone').onclick=async()=>{const id=selectionRun?.appliedIds?.find(id=>photos.some(p=>p.id===id&&p.decision==='keep'));if(!id)return;closeSelectionDraft();await select(id,{openViewer:true});if(originalPreview)showTone();else showReview();};
+ $('selectionRecover').onclick=async()=>{const id=selectionRun?.failureId||selected;closeSelectionDraft();if(id)await select(id,{openViewer:true});showSaveRecovery();};
+ dialog.addEventListener('cancel',event=>{event.preventDefault();closeSelectionDraft();});
+}
+function updateSelectionEntry(){const b=$('selectionDraft');if(!b)return;b.disabled=busy||exporting||batchApplying||decisionBusy||toneNavigationBusy||selectionApplying||Boolean(folderRun)||!photos.length;$('selectionRestore').hidden=!selectionUndo;$('selectionRestore').disabled=b.disabled;}
+function releaseSelectionThumbs(){for(const url of selectionThumbs.values())URL.revokeObjectURL(url);selectionThumbs.clear();}
+async function openSelectionDraft(){
+ if($('selectionDraft').disabled||document.querySelector('dialog[open]'))return;
+ selectionRun={phase:'preparing',origin:document.activeElement,page:0,source:photos};const run=selectionRun;$('selectionStatus').classList.remove('error');$('selectionStatus').textContent='正在整理本機草案…';$('selectionSummary').textContent='';$('selectionDialog').showModal();$('selectionList').replaceChildren();$('selectionApply').hidden=false;$('selectionApply').textContent='保留勾選照片';$('selectionApply').disabled=true;$('selectionCancel').textContent='取消';$('selectionPager').hidden=true;$('selectionTone').hidden=$('selectionUndo').hidden=$('selectionRecover').hidden=true;
+ await saveQueue.catch(()=>{});if(run!==selectionRun||run.source!==photos||!$('selectionDialog').open)return;
+ if(photos.some(p=>p._conflict||($('persist').checked&&p._dirty))){run.phase='blocked';run.failureId=photos.find(p=>p._conflict||p._dirty)?.id;$('selectionStatus').textContent='先處理未保存／版本衝突，再建立草案；選片未變。';$('selectionRecover').hidden=false;return;}
+ const draft=buildSelectionDraft(photos);Object.assign(run,{phase:'review',rows:draft.rows,alreadyKept:draft.alreadyKept,guards:photos.map(p=>({id:p.id,revision:p.revision,edits:editsOf(p)}))});
+ $('selectionStatus').textContent=run.rows.length?'可換候選或取消；確認前不改任何照片。':'沒有新的待定候選；已有保留與排除均保留。';renderSelectionDraft();
+}
+function selectionChanged(){const run=selectionRun;if(!run||run.phase!=='review')return;const n=run.rows.filter(r=>r.checked).length;$('selectionApply').disabled=!n||selectionApplying;$('selectionApply').textContent=`保留勾選 ${n} 張`;$('selectionSummary').textContent=`${run.rows.length} 組待確認 · 勾選 ${n} 張 · ${run.alreadyKept} 組已有保留`;$('selectionSummary').dataset.count=String(n);}
+function renderSelectionDraft(focus=false){
+ const run=selectionRun;if(!run||run.phase!=='review')return;releaseSelectionThumbs();const list=$('selectionList');list.replaceChildren();const pages=Math.max(1,Math.ceil(run.rows.length/8));run.page=Math.max(0,Math.min(pages-1,run.page));
+ for(const row of run.rows.slice(run.page*8,run.page*8+8)){
+  const p=photos.find(p=>p.id===row.chosenId);if(!p)continue;const card=document.createElement('section');card.className='selectionCard';card.dataset.groupId=row.key;card.dataset.photoId=p.id;card.dataset.kind=row.kind;
+  const image=document.createElement('img'),url=URL.createObjectURL(p.thumb);selectionThumbs.set(row.key,url);image.src=url;image.alt=`原圖縮圖：${photoLabel(p)}`;image.width=320;image.height=200;card.append(image);
+  const top=document.createElement('div');top.className='selectionCardHead';const label=document.createElement('label'),check=document.createElement('input');check.type='checkbox';check.checked=row.checked;check.dataset.groupId=row.key;check.setAttribute('aria-label',`保留候選 ${photoLabel(p)}`);check.onchange=()=>{row.checked=check.checked;selectionChanged();};label.append(check,document.createTextNode(` 第 ${row.groupIndex+1} 組`));const badge=document.createElement('strong');badge.textContent=row.kind==='suggested'?'規則起點':row.kind==='unknown'?'評估未知':'請人工確認';top.append(label,badge);card.append(top);
+  const select=document.createElement('select');select.setAttribute('aria-label',`第 ${row.groupIndex+1} 組候選`);for(const id of row.candidateIds){const candidate=photos.find(p=>p.id===id),option=document.createElement('option');option.value=id;option.textContent=photoLabel(candidate);select.append(option);}select.value=p.id;select.onchange=()=>{row.chosenId=select.value;row.checked=false;renderSelectionDraft();const current=[...$('selectionList').querySelectorAll('.selectionCard')].find(c=>c.dataset.groupId===row.key);current?.querySelector('select')?.focus({preventScroll:true});};card.append(select);
+  const identity=document.createElement('p');identity.className='selectionIdentity';identity.textContent=photoLabel(p);card.append(identity);
+  const reason=document.createElement('p');reason.className='selectionReason';reason.textContent=(row.chosenId===row.candidateIds[0]?row.reason:'你換選的候選，請勾選確認')+' · 原圖';card.append(reason);
+  const details=document.createElement('details'),summary=document.createElement('summary');summary.textContent='規則與限制';const text=document.createElement('p');const m=p.metrics;const known=m?.version===2&&['score','sharpness','dark','bright'].every(k=>Number.isFinite(m[k]));text.textContent=known?`規則 ${m.score}/100 · 細節 ${m.sharpness} · 暗部 ${Math.round(m.dark*100)}% · 高光 ${Math.round(m.bright*100)}%。不辨識主體、表情或喜好，相似分組需人工確認。`:'評估未知，不能推定清晰或曝光正常。請回照片放大確認。';if(p.sourceFormat==='RAF')text.textContent+=' RAF僅內嵌JPEG預覽，非RAW顯影。';details.append(summary,text);card.append(details);
+  const compare=document.createElement('button');compare.append(studioIcon('compare'),document.createTextNode('放大比較'));compare.onclick=async()=>{const id=row.chosenId;closeSelectionDraft();await select(id,{openViewer:true});if(originalPreview)openPhotoComparison();};card.append(compare);list.append(card);
+ }
+ $('selectionPager').hidden=pages===1;$('selectionPrev').disabled=run.page===0;$('selectionNext').disabled=run.page===pages-1;$('selectionPage').textContent=`${run.page+1} / ${pages}`;selectionChanged();if(focus){list.scrollIntoView({block:'start'});const input=list.querySelector('input');input?.focus({preventScroll:true});}
+}
+function closeSelectionDraft(){if(selectionApplying)return;const run=selectionRun;selectionRun=null;releaseSelectionThumbs();$('selectionDialog').close();if(run?.origin?.isConnected&&!run.origin.disabled)run.origin.focus({preventScroll:true});}
+function openSelectionUndo(){if(!selectionUndo||$('selectionRestore').disabled||document.querySelector('dialog[open]'))return;selectionRun={phase:'done',source:photos,origin:document.activeElement,appliedIds:selectionUndo.history.map(h=>h.id)};$('selectionDialog').showModal();$('selectionList').replaceChildren();$('selectionPager').hidden=$('selectionApply').hidden=$('selectionRecover').hidden=true;$('selectionTone').hidden=!photos.some(p=>selectionRun.appliedIds.includes(p.id)&&p.decision==='keep');$('selectionUndo').hidden=false;$('selectionCancel').textContent='回照片';$('selectionSummary').textContent=`上次草案保留 ${selectionUndo.history.length} 張`;$('selectionStatus').classList.remove('error');$('selectionStatus').textContent='僅復原仍與當時相同的版本；有新微調的照片保留新編輯。';}
+function selectionFailure(error,run){run.failureId=error.id||null;if(error.code==='CONFLICT'){const p=photos.find(p=>p.id===error.id);if(p){p._conflict=error.current;saveErrors.set(p,'版本衝突');}updateSaveState();}$('selectionStatus').textContent=error.code==='CONFLICT'?'其他分頁已有新版本；整批未變。先處理保存，再重新建立草案。':'整批未保存，沒有套用部分保留；可重試或取消。';$('selectionStatus').classList.add('error');$('selectionRecover').hidden=error.code!=='CONFLICT';}
+async function applySelectionDraft(){
+ const run=selectionRun;if(selectionApplying||run?.phase!=='review')return;const ids=run.rows.filter(r=>r.checked).map(r=>r.chosenId);if(!ids.length)return;
+ selectionApplying=true;run.phase='applying';$('selectionApply').disabled=true;$('selectionCancel').disabled=true;setButtonBusy('selectionApply',true);$('selectionStatus').classList.remove('error');$('selectionStatus').textContent='正在整批保存…';updateSelectionEntry();for(const node of $('selectionList').querySelectorAll('input,select,button'))node.disabled=true;for(const id of ['selectionPrev','selectionNext'])$(id).disabled=true;
+ try{
+  await saveQueue.catch(()=>{});if(run!==selectionRun||run.source!==photos)throw Error('來源已變');
+  if(run.guards.some(g=>{const p=photos.find(p=>p.id===g.id);return!p||p.revision!==g.revision||!sameEdits(p,g.edits)||p._conflict||($('persist').checked&&p._dirty);} ))throw Error('草案建立後編輯已改變，請取消後重開');
+  const chosen=ids.map(id=>photos.find(p=>p.id===id));if(chosen.some(p=>!p||p.decision!=='pending'))throw Error('人工決定已改變');
+  const changes=chosen.map(p=>({id:p.id,revision:p.revision,edits:{...editsOf(p),decision:'keep'}}));const persisted=$('persist').checked;
+  const saved=persisted?await store.saveBatch(changes,{guards:run.guards}):changes.map(c=>({...c.edits,id:c.id,revision:photos.find(p=>p.id===c.id).revision}));
+  const history=chosen.map(p=>({id:p.id,before:editsOf(p)}));for(const record of saved){const p=photos.find(p=>p.id===record.id);Object.assign(p,editsOf(record));p.revision=record.revision;p._dirty=!persisted;p._conflict=null;saveErrors.delete(p);const item=history.find(h=>h.id===p.id);item.applied=editsOf(p);item.revision=p.revision;}
+  selectionUndo={history,persisted};for(const[id,value]of Object.entries({keep:'keep',exclude:'exclude',resetDecision:'pending'}))$(id).setAttribute('aria-pressed',String(current()?.decision===value));run.appliedIds=ids;run.phase='done';lastDecision=null;render();$('selectionList').replaceChildren();releaseSelectionThumbs();$('selectionPager').hidden=true;$('selectionApply').hidden=true;$('selectionTone').hidden=false;$('selectionUndo').hidden=false;$('selectionSummary').textContent=`已保留 ${ids.length} 張 · 其餘照片未改`;$('selectionStatus').textContent=persisted?'瀏覽器已存；接著逐張調色，或復原本次保留。':'只留本分頁；關閉／刷新不保留。接著可逐張調色並另存副本。';$('selectionCancel').textContent='回照片';$('selectionTone').focus();
+ }catch(error){run.phase='review';selectionFailure(error,run);selectionChanged();}
+ finally{selectionApplying=false;setButtonBusy('selectionApply',false);$('selectionCancel').disabled=false;updateSelectionEntry();if(run.phase==='review')renderSelectionDraft();}
+}
+async function undoSelectionDraft(){
+ const run=selectionRun,undo=selectionUndo;if(selectionApplying||run?.phase!=='done'||!undo)return;selectionApplying=true;$('selectionUndo').disabled=$('selectionTone').disabled=$('selectionCancel').disabled=true;setButtonBusy('selectionUndo',true);let skipped=0;
+ try{await saveQueue.catch(()=>{});const eligible=undo.history.filter(h=>{const p=photos.find(p=>p.id===h.id),same=p&&p.revision===h.revision&&sameEdits(p,h.applied)&&!p._conflict;if(!same)skipped++;return same;});
+  if(undo.persisted!==$('persist').checked)throw Error('保存模式已變，請回照片處理');
+  const changes=eligible.map(h=>({id:h.id,revision:h.revision,edits:h.before}));const saved=undo.persisted?await store.saveBatch(changes):changes.map(c=>({...c.edits,id:c.id,revision:c.revision}));
+  for(const r of saved){const p=photos.find(p=>p.id===r.id);Object.assign(p,editsOf(r));p.revision=r.revision;p._dirty=!undo.persisted;p._conflict=null;}selectionUndo=null;for(const[id,value]of Object.entries({keep:'keep',exclude:'exclude',resetDecision:'pending'}))$(id).setAttribute('aria-pressed',String(current()?.decision===value));$('selectionUndo').hidden=true;$('selectionTone').hidden=!photos.some(p=>run.appliedIds.includes(p.id)&&p.decision==='keep');render();$('selectionSummary').textContent=`已復原 ${saved.length} 張${skipped?' · '+skipped+' 張已有新編輯，未改':''}`;$('selectionStatus').textContent='原片、原有保留／排除與調色均保留。';
+ }catch(error){selectionFailure(error,run);}
+ finally{selectionApplying=false;setButtonBusy('selectionUndo',false);$('selectionUndo').disabled=$('selectionTone').disabled=$('selectionCancel').disabled=false;updateSelectionEntry();}
+}
+
+function setupWorkbenchFlow(){
+ const nav=document.createElement('nav');nav.id='workbenchFlow';nav.setAttribute('aria-label','本批照片工作流程：挑片、調色、輸出副本');nav.hidden=true;
+ const tone=document.createElement('button');tone.id='workflowTone';tone.onclick=openWorkflowTone;
+ for(const button of[$('selectionDraft'),tone,$('exportZip')]){button.classList.add('workflowStep');nav.append(button);button.addEventListener('click',()=>requestAnimationFrame(updateWorkbenchFlow));}
+ document.querySelector('#workspace .toolbar').before(nav);for(const id of['selectionDialog','zipExport'])$(id).addEventListener('close',updateWorkbenchFlow);matchMedia('(max-width:760px)').addEventListener('change',updateWorkbenchFlow);updateWorkbenchFlow();
+}
+function updateWorkbenchFlow(){
+ const nav=$('workbenchFlow');if(!nav)return;nav.hidden=!photos.length;if(photos.length){$('count').textContent=photos.length+' 張';$('reviewProgress').hidden=true;}const kept=photos.filter(p=>p.decision==='keep').length,pending=photos.filter(p=>p.decision==='pending').length,unavailable=busy||exporting||batchApplying||decisionBusy||toneNavigationBusy||selectionApplying||Boolean(folderRun),active=$('zipExport')?.open?3:$('selectionDialog')?.open?1:viewMode==='focus'&&document.body.dataset.stage==='tone'?2:1;
+ const compactFlow=matchMedia('(max-width:760px)').matches;const stages=[['selectionDraft','01','挑片',`${pending} 張待定`,'layers'],['workflowTone','02','逐張調色',`${kept} 張保留`,'sliders'],['exportZip','03','輸出副本',`${kept} 張可選`,'download']];
+ for(const[id,number,title,detail,icon]of stages){const button=$(id),index=Number(number),serial=document.createElement('span'),label=document.createElement('strong'),count=document.createElement('span'),name=document.createElement('span');serial.className='workflowNumber';serial.textContent=number;name.className='workflowName';label.textContent=compactFlow?['挑片','調色','輸出'][index-1]:title;count.textContent=index>1&&!kept?'先保留':compactFlow?(index===1?pending+' 待定':kept+' 張'):detail;name.append(label,count);button.replaceChildren(serial,studioIcon(icon),name);button.disabled=unavailable||(index>1&&!kept);button.classList.toggle('isCurrent',index===active);if(index===active)button.setAttribute('aria-current','step');else button.removeAttribute('aria-current');button.setAttribute('aria-label',(index===1?'建立可審閱的選片草案':index===2?'逐張調色已保留照片':'打包已保留照片的JPEG副本')+'，'+detail);describeDisabled(id,index>1&&!kept?'先保留照片，再進行這一步':unavailable?'先完成目前操作':'');}
+}
+async function openWorkflowTone(){
+ if($('workflowTone').disabled||document.querySelector('dialog[open]'))return;const origin=current();let recovery=false;toneNavigationBusy=true;setBusy(busy);
+ try{await saveQueue.catch(()=>{});if(origin?._conflict||origin?._dirty&&$('persist').checked&&!await saveOne(origin)){recovery=true;return;}const target=current()?.decision==='keep'?current():keptTonePhotos()[0];if(!target)return;await select(target.id,{openViewer:true});if(selected===target.id&&originalPreview)showTone();else showReview();}
+ finally{toneNavigationBusy=false;setBusy(busy);if(recovery)showSaveRecovery();}
+}
+
+setupSelectionDraft();setupWorkbenchFlow();
 window.addEventListener('beforeunload',event=>{if(photos.some(p=>p._dirty)){event.preventDefault();event.returnValue='';}});
 window.addEventListener('pagehide',event=>{
   if(event.persisted)return;
+  releaseSelectionThumbs();selectionRun=null;
   folderRun?.controller.abort();folderRun=null;exportController?.abort();mobileCanvasObserver?.disconnect();
   zipController?.abort();releaseZipArtifact();zipTasks=[];
   galleryGeneration++;for(const url of [...urls.values(),...downloadURLs])URL.revokeObjectURL(url);for(const id of styledThumbs.keys())releaseStyledThumbnail(id);

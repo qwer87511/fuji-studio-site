@@ -94,6 +94,23 @@ export function orderedPhotoGroups(photos){
   // Complete-link membership must see the same order after import, reload or another tab.
   return groups([...photos].sort((a,b)=>photoNameOrder.compare(a.name,b.name)||String(a.id).localeCompare(String(b.id))));
 }
+// A reviewable rule-based draft. Never changes a decision or assigns aesthetic confidence.
+export function buildSelectionDraft(photos){
+ const valid=p=>p.metrics?.version===2&&['score','sharpness','dark','bright'].every(k=>typeof p.metrics[k]==='number'&&Number.isFinite(p.metrics[k]))&&p.metrics.score>=0&&p.metrics.score<=100&&p.metrics.sharpness>=0&&['dark','bright'].every(k=>p.metrics[k]>=0&&p.metrics[k]<=1);
+ let alreadyKept=0;const rows=[];
+ for(const[groupIndex,g]of orderedPhotoGroups(photos).entries()){
+  if(g.items.some(p=>p.decision==='keep')){alreadyKept++;continue;}
+  const candidates=g.items.filter(p=>p.decision==='pending').sort((a,b)=>Number(valid(b))-Number(valid(a))||(valid(a)&&valid(b)?b.metrics.score-a.metrics.score:0)||photoNameOrder.compare(a.name,b.name)||String(a.id).localeCompare(String(b.id)));
+  if(!candidates.length)continue;
+  const p=candidates[0],known=candidates.every(valid),gap=known&&candidates.length>1?p.metrics.score-candidates[1].metrics.score:null;
+  const warning=valid(p)&&(p.metrics.sharpness<60||p.metrics.dark>.18||p.metrics.bright>.12||(Number.isFinite(p.metrics.alpha)&&p.metrics.alpha<.99));
+  const kind=!known?'unknown':g.items.length===1?'single':gap===null?'manual':gap<5?'close':warning?'warning':'suggested';
+  const reason={unknown:'評估未知，請人工檢查',single:'單張，沒有同組對照',manual:'其餘候選已有人工決定',close:'前兩張只差 '+gap+' 分',warning:'分差 '+gap+'，仍有細節／曝光警訊',suggested:'細節／曝光分差 '+gap}[kind];
+  rows.push({key:g.items[0].id,groupIndex,memberIds:g.items.map(p=>p.id),candidateIds:candidates.map(p=>p.id),chosenId:p.id,gap,kind,reason,checked:kind==='suggested'});
+ }
+ return{rows,alreadyKept,pending:photos.filter(p=>p.decision==='pending').length};
+}
+
 export function qualityBreakdown(metrics){
   const sharpness=Math.max(0,Number(metrics.sharpness)||0),dark=Math.max(0,Math.min(1,Number(metrics.dark)||0)),bright=Math.max(0,Math.min(1,Number(metrics.bright)||0));
   const detail=Math.min(70,Math.log2(sharpness+1)*7),exposure=30*(1-Math.min(1,dark+bright));
@@ -196,8 +213,31 @@ export async function openStore() {
     });
   }
 
+  // Bounded edit-only CAS transaction: any guard conflict or failed put rolls back every edit.
+  function saveBatch(changes,{guards=changes,signal}={}){
+    if(!Array.isArray(changes)||!Array.isArray(guards)||changes.length>400||guards.length>400)return Promise.reject(new Error('整批編輯超過上限'));
+    const ids=changes.map(p=>p.id),guardIds=guards.map(p=>p.id);
+    if(new Set(ids).size!==ids.length||new Set(guardIds).size!==guardIds.length||ids.some(id=>!guardIds.includes(id))||guards.some(p=>typeof p.id!=='string'||!Number.isInteger(p.revision)||p.revision<0))return Promise.reject(new Error('整批編輯版本或身份無效'));
+    if(signal?.aborted)return Promise.reject(new DOMException('已取消整批編輯','AbortError'));
+    if(!changes.length)return Promise.resolve([]);
+    const byId=new Map(changes.map(p=>[p.id,p]));
+    return new Promise((resolve,reject)=>{
+      const transaction=db.transaction('photos','readwrite'),store=transaction.objectStore('photos'),results=new Map();let failure;
+      const abort=()=>{failure=new DOMException('已取消整批編輯','AbortError');try{transaction.abort();}catch{}};
+      signal?.addEventListener('abort',abort,{once:true});const cleanup=()=>signal?.removeEventListener('abort',abort);
+      transaction.oncomplete=()=>{cleanup();resolve(ids.map(id=>results.get(id)));};
+      transaction.onerror=transaction.onabort=()=>{cleanup();reject(failure||transaction.error||new Error('整批編輯未保存'));};
+      for(const guard of guards){const request=store.get(guard.id);request.onsuccess=()=>{try{
+        const existing=request.result;if(!existing)throw Object.assign(new Error('本機原片紀錄不存在'),{code:'MISSING_RECORD',id:guard.id});
+        if((existing.revision||0)!==guard.revision)throw Object.assign(new Error('另一個分頁已保存較新的版本'),{code:'CONFLICT',id:guard.id,current:existing});
+        const change=byId.get(guard.id);if(change){const record={...existing,...editsOf(change.edits),revision:(existing.revision||0)+1};store.put(record);results.set(guard.id,record);}
+      }catch(error){failure=error;transaction.abort();}};}
+    });
+  }
+
   return {
     all: () => read(),
+    saveBatch,
     count: () => new Promise((resolve,reject)=>{
       const transaction=db.transaction('photos','readonly'),request=transaction.objectStore('photos').count();
       transaction.oncomplete=()=>resolve(request.result);
